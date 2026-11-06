@@ -1,0 +1,1 @@
+web: RUN_MODE=worker gunicorn "bot:_create_worker_app()" -w 1 -b 0.0.0.0:$PORT --timeout 660 --keep-alive 5 --log-level warning
