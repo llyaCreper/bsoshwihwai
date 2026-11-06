@@ -2088,6 +2088,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_ADMIN_PASSWORD
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED
     query    = update.callback_query
     user_id  = update.effective_user.id
     tg       = update.effective_user
@@ -2496,7 +2497,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ("admin_toggle_no2fa", "admin_toggle_2fa"):
         if user_id not in ADMIN_IDS or not context.user_data.get("admin_auth"):
             return WAITING_MENU
-        global SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED
         no2fa_cur, fa2_cur = await loop.run_in_executor(executor, db_get_service_flags)
         SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED = no2fa_cur, fa2_cur
         if data == "admin_toggle_no2fa":
