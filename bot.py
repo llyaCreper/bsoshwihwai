@@ -38,7 +38,156 @@ def escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]`\\])', r'\\\1', str(text))
 
 
-# Прокси не используются — прямое подключение
+# ══════════════════════════════════════════════════════════════════════
+# 🌐 ПРОКСИ — пул резидентных прокси (формат: ip:port:login:password)
+# ══════════════════════════════════════════════════════════════════════
+# Укажите путь к файлу с прокси (один прокси на строку: ip:port:login:password)
+# Или положите файл proxies.txt рядом с bot.py
+CONFIG_PROXY_FILE = ""  # Пример: "/app/proxies.txt"
+
+_proxy_pool: list[str] = []
+_proxy_lock  = __import__("threading").Lock()
+_proxy_index = 0
+
+def _load_proxy_pool() -> list[str]:
+    """Загружает пул прокси из файла или env PROXY_URL / PROXY_LIST."""
+    proxies: list[str] = []
+
+    # 1. Одиночный прокси из PROXY_URL (например socks5://login:pass@ip:port)
+    single = os.environ.get("PROXY_URL", "").strip()
+    if single:
+        logging.info("Используется единственный прокси из PROXY_URL")
+        return [single]
+
+    # 2. Из переменной окружения PROXY_LIST
+    env_list = os.environ.get("PROXY_LIST", "").strip()
+    if env_list:
+        for line in env_list.replace(";", "\n").replace(",", "\n").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                proxies.append(line)
+        if proxies:
+            return proxies
+
+    # 2. Из CONFIG_PROXY_FILE или proxies.txt рядом со скриптом
+    candidates = []
+    if CONFIG_PROXY_FILE:
+        candidates.append(CONFIG_PROXY_FILE)
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxies.txt"))
+
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            proxies.append(line)
+                if proxies:
+                    logging.info("Загружено %d прокси из %s", len(proxies), path)
+                    return proxies
+            except Exception as e:
+                logging.warning("Ошибка чтения прокси файла %s: %s", path, e)
+
+    return proxies
+
+
+def _parse_proxy(proxy_str: str) -> dict | None:
+    """
+    Парсит строку прокси в формат для requests.
+    Поддерживает все форматы VProxy и других провайдеров:
+      hostname:port:login:password      ← формат VProxy (рекомендуется)
+      hostname:port@login:password
+      login:password:hostname:port
+      login:password@hostname:port
+      hostname:port
+      socks5://login:pass@hostname:port
+      http://login:pass@hostname:port
+    Протокол берётся из env PROXY_PROTOCOL (по умолчанию http).
+    """
+    s = proxy_str.strip()
+    if not s:
+        return None
+
+    # Протокол: из env или http по умолчанию
+    protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
+
+    # Уже готовый URL-формат — используем как есть
+    if s.startswith(("http://", "https://", "socks5://", "socks4://")):
+        return {"http": s, "https": s}
+
+    parts = s.split(":")
+
+    if len(parts) == 4:
+        a, b, c, d = parts
+
+        # hostname:port:login:password — порт это число во 2й позиции
+        if b.isdigit():
+            host, port, login, password = a, b, c, d
+        # login:password:hostname:port — порт это число в 4й позиции
+        elif d.isdigit():
+            login, password, host, port = a, b, c, d
+        else:
+            logging.warning("Неизвестный формат прокси (4 части): %s", s)
+            return None
+
+        url = f"{protocol}://{login}:{password}@{host}:{port}"
+        return {"http": url, "https": url}
+
+    # Формат hostname:port@login:password или login:password@hostname:port
+    if len(parts) == 3 and "@" in s:
+        left, right = s.split("@", 1)
+        left_parts  = left.split(":")
+        right_parts = right.split(":")
+        # hostname:port @ login:password
+        if len(left_parts) == 2 and left_parts[1].isdigit():
+            host, port = left_parts
+            login, password = right_parts[0], right_parts[1] if len(right_parts) > 1 else ""
+        # login:password @ hostname:port
+        elif len(right_parts) == 2 and right_parts[1].isdigit():
+            login, password = left_parts[0], left_parts[1] if len(left_parts) > 1 else ""
+            host, port = right_parts
+        else:
+            logging.warning("Неизвестный формат прокси (@): %s", s)
+            return None
+        url = f"{protocol}://{login}:{password}@{host}:{port}"
+        return {"http": url, "https": url}
+
+    # Формат hostname:port (без авторизации)
+    if len(parts) == 2 and parts[1].isdigit():
+        url = f"{protocol}://{s}"
+        return {"http": url, "https": url}
+
+    logging.warning("Неизвестный формат прокси: %s", s)
+    return None
+
+
+def get_next_proxy() -> dict | None:
+    """Возвращает следующий прокси из пула (round-robin). None если пул пуст."""
+    global _proxy_index
+    if not _proxy_pool:
+        return None
+    with _proxy_lock:
+        proxy_str = _proxy_pool[_proxy_index % len(_proxy_pool)]
+        _proxy_index += 1
+    return _parse_proxy(proxy_str)
+
+
+def _make_roblox_session(cookie: str) -> "requests.Session":
+    """Создаёт requests.Session с куки Roblox и, если есть пул, с прокси."""
+    s = requests.Session()
+    s.cookies[".ROBLOSECURITY"] = cookie
+    s.headers.update({
+        "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Content-Type": "application/json;charset=utf-8",
+        "Accept":       "application/json, text/plain, */*",
+        "Origin":       "https://www.roblox.com",
+        "Referer":      "https://www.roblox.com/my/account#!/info",
+    })
+    proxy = get_next_proxy()
+    if proxy:
+        s.proxies.update(proxy)
+    return s
 
 # ══════════════════════════════════════════════════════════════════════
 # 👑 АДМИНИСТРАТОРЫ И НАСТРОЙКИ ПЛАТЕЖЕЙ
@@ -182,6 +331,13 @@ BOT_TOKEN        = os.environ.get("BOT_TOKEN")
 CRYPTO_BOT_TOKEN  = load_crypto_bot_token()
 XROCKET_TOKEN     = load_xrocket_token()
 DATABASE_URL     = os.environ.get("DATABASE_URL", "")
+
+# Загружаем пул прокси при старте
+_proxy_pool = _load_proxy_pool()
+if _proxy_pool:
+    logging.info("🌐 Пул прокси активен: %d шт.", len(_proxy_pool))
+else:
+    logging.info("🌐 Прокси не настроены — прямое подключение")
 
 def get_bot_token() -> str:
     """
@@ -946,7 +1102,22 @@ TEXTS = {
         "sub_active_forever":"✅ Подписка: *Навсегда*",
         "sub_none":          "❌ Подписки нет",
         "sub_bought":        "✅ Подписка активирована!\n{desc}",
-        "help_text":         "*Помощь*\n\n🔓 Без 2FA — *БЕСПЛАТНО*\n🔐 С 2FA — *$1.00* за попытку\n♾️ Подписка 2FA — безлимит",
+        "help_text": (
+            "📖 *Инструкция*\n\n"
+            "┌─ 📷 *Ссылка Camera \\(Face\\)* — $1\\.0\n"
+            "│   • Persona\\-ссылка для селфи\n"
+            "│   • Метод: прямая ссылка\n"
+            "└─ • Время: 30 секунд\n\n"
+            "┌─ 🪪 *Ссылка ID \\(Паспорт\\)* — $1\\.0\n"
+            "│   • Persona\\-ссылка для документов\n"
+            "│   • Метод: прямая ссылка\n"
+            "└─ • Время: 30 секунд\n\n"
+            "⚠️ *Важно*\n"
+            "• Дублируйте кук или убирайте IP\\-lock\n"
+            "• Верифицированные аккаунты не подходят\n"
+            "• Если вы не хотите ломание куков — бот и владелец не советует фрешать куки\n\n"
+            "📌 Поддержка: @dedbed12"
+        ),
         "top_title":         "*Топ пользователей*\n",
         "top_empty":         "Пока никто не совершил покупок.",
         "buy_title":         "*Магазин*",
@@ -1021,7 +1192,22 @@ TEXTS = {
         "sub_active_forever":"✅ Subscription: *Forever*",
         "sub_none":          "❌ No subscription",
         "sub_bought":        "✅ Subscription activated!\n{desc}",
-        "help_text":         "*Help*\n\n🔓 Without 2FA — *FREE*\n🔐 With 2FA — *$1.00* per attempt",
+        "help_text": (
+            "📖 *Instructions*\n\n"
+            "┌─ 📷 *Camera Link \\(Face\\)* — $1\\.0\n"
+            "│   • Persona link for selfie\n"
+            "│   • Method: direct link\n"
+            "└─ • Time: 30 seconds\n\n"
+            "┌─ 🪪 *ID Link \\(Passport\\)* — $1\\.0\n"
+            "│   • Persona link for documents\n"
+            "│   • Method: direct link\n"
+            "└─ • Time: 30 seconds\n\n"
+            "⚠️ *Important*\n"
+            "• Duplicate the cookie or remove IP\\-lock\n"
+            "• Verified accounts are not suitable\n"
+            "• If you don't want cookies to break — the bot and owner advise against refreshing cookies\n\n"
+            "📌 Support: @dedbed12"
+        ),
         "top_title":         "*Top users*\n",
         "top_empty":         "No purchases yet.",
         "buy_title":         "*Shop*",
@@ -1200,14 +1386,7 @@ def t(user_id, key, lang_override=None, **kwargs) -> str:
 def get_url_via_api(cookie: str, method: str) -> str | None:
     """Прямой вызов API для аккаунтов без 2FA."""
     try:
-        s = requests.Session()
-        s.cookies[".ROBLOSECURITY"] = cookie
-        s.headers.update({
-            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Content-Type": "application/json;charset=utf-8",
-            "Origin":       "https://www.roblox.com",
-            "Referer":      "https://www.roblox.com/my/account#!/info",
-        })
+        s = _make_roblox_session(cookie)
         url  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
         body = (
             {"generateLink": True, "ageEstimation": False, "parentVerification": False}
@@ -1240,15 +1419,7 @@ def get_url_via_api_2fa(cookie: str, method: str) -> "str | dict | None":
     import json as _json
 
     try:
-        s = requests.Session()
-        s.cookies[".ROBLOSECURITY"] = cookie
-        s.headers.update({
-            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Content-Type": "application/json;charset=utf-8",
-            "Accept":       "application/json, text/plain, */*",
-            "Origin":       "https://www.roblox.com",
-            "Referer":      "https://www.roblox.com/my/account#!/info",
-        })
+        s = _make_roblox_session(cookie)
         url = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
         body = (
             {"generateLink": True, "ageEstimation": False, "parentVerification": False}
@@ -1432,16 +1603,9 @@ def verify_2fa_code(
 
     inner_challenge_id = inner_challenge_id or challenge_id
     try:
-        s = requests.Session()
-        s.cookies[".ROBLOSECURITY"] = cookie
-        s.headers.update({
-            "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Content-Type": "application/json;charset=utf-8",
-            "Accept":       "application/json, text/plain, */*",
-            "x-csrf-token": csrf,
-            "Origin":       "https://www.roblox.com",
-            "Referer":      "https://www.roblox.com/my/account#!/info",
-        })
+        s = _make_roblox_session(cookie)
+        if csrf:
+            s.headers["x-csrf-token"] = csrf
 
         def _update_csrf(resp) -> None:
             """Всегда обновляем CSRF из ответа, если он есть."""
@@ -1831,7 +1995,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query    = update.callback_query
-    await query.answer()
+    # query.answer() уже вызван в handle_callback
     user_id  = update.effective_user.id
     lang     = "ru" if query.data == "set_lang_ru" else "en"
     loop     = asyncio.get_running_loop()
@@ -1859,6 +2023,7 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     promos = await loop.run_in_executor(executor, db_get_all_promos)
     no2fa_icon = "✅" if SERVICE_NO2FA_ENABLED else "❌"
     fa2_icon   = "✅" if SERVICE_2FA_ENABLED   else "❌"
+    proxy_status = f"🌐 *{'ВКЛ — ' + str(len(_proxy_pool)) + ' шт.' if _proxy_pool else 'ВЫКЛ — прямое подключение'}*"
     text = (
         f"🛠 *Админ панель (2FA защита: ID + Пароль)*\n\n"
         f"👥 Пользователей в базе: *{len(rows)}*\n"
@@ -1867,7 +2032,9 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔧 *Режимы получения ссылок:*\n"
         f"  🔓 Без 2FA: *{'ВКЛ' if SERVICE_NO2FA_ENABLED else 'ВЫКЛ'}*\n"
-        f"  🔐 С 2FA: *{'ВКЛ' if SERVICE_2FA_ENABLED else 'ВЫКЛ'}*"
+        f"  🔐 С 2FA: *{'ВКЛ' if SERVICE_2FA_ENABLED else 'ВЫКЛ'}*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌐 *Прокси пул:* {proxy_status}"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{no2fa_icon} Без 2FA: {'ВКЛ' if SERVICE_NO2FA_ENABLED else 'ВЫКЛ'}",
@@ -1916,12 +2083,17 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query    = update.callback_query
-    await query.answer()
     user_id  = update.effective_user.id
     tg       = update.effective_user
     username = tg.username or tg.first_name or "Аноним"
     data     = query.data
     loop     = asyncio.get_running_loop()
+
+    # Всегда отвечаем на callback сразу — иначе Telegram покажет бесконечную загрузку
+    try:
+        await query.answer()
+    except Exception:
+        pass  # Уже был отвечен или истёк таймаут — продолжаем
 
     if data == "cancel_2fa":
         return await receive_2fa_code(update, context)
@@ -1943,7 +2115,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "help":
         await query.edit_message_text(
             t(user_id, "help_text"),
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
             ]]),
@@ -2086,16 +2258,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         discount = DISCOUNTS_2FA.get(count, 0)
         total    = round(count * PRICE_2FA * (1 - discount), 2)
         if method == "cb":
-            raw = await loop.run_in_executor(executor, create_invoice, total, count)
+            try:
+                raw = await loop.run_in_executor(executor, create_invoice, total, count)
+            except Exception as e:
+                logging.error("CryptoPay run_in_executor error: %s", e)
+                raw = None
             if not raw:
-                await query.answer(t(user_id, "pay_error"), show_alert=True)
+                await query.edit_message_text(
+                    t(user_id, "pay_error"),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")
+                    ]]),
+                )
                 return WAITING_BUY
             inv_key = f"cb_{raw['invoice_id']}"
             pay_url = raw["pay_url"]
         else:
-            raw = await loop.run_in_executor(executor, xrocket_create_invoice, total, count)
+            try:
+                raw = await loop.run_in_executor(executor, xrocket_create_invoice, total, count)
+            except Exception as e:
+                logging.error("xRocket run_in_executor error: %s", e)
+                raw = None
             if not raw:
-                await query.answer(t(user_id, "pay_error"), show_alert=True)
+                await query.edit_message_text(
+                    t(user_id, "pay_error"),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")
+                    ]]),
+                )
                 return WAITING_BUY
             inv_key = f"xr_{raw['invoice_id']}"
             pay_url = raw["pay_url"]
@@ -2241,17 +2431,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ("admin_toggle_no2fa", "admin_toggle_2fa"):
         if user_id not in ADMIN_IDS or not context.user_data.get("admin_auth"):
             return WAITING_MENU
+        global SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED
         SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED = db_get_service_flags()
         if data == "admin_toggle_no2fa":
             SERVICE_NO2FA_ENABLED = not SERVICE_NO2FA_ENABLED
             db_set_setting("service_no2fa", "true" if SERVICE_NO2FA_ENABLED else "false")
-            status = "включён ✅" if SERVICE_NO2FA_ENABLED else "выключен ❌"
-            await query.answer(f"Режим Без 2FA {status}", show_alert=True)
         else:
             SERVICE_2FA_ENABLED = not SERVICE_2FA_ENABLED
             db_set_setting("service_2fa", "true" if SERVICE_2FA_ENABLED else "false")
-            status = "включён ✅" if SERVICE_2FA_ENABLED else "выключен ❌"
-            await query.answer(f"Режим С 2FA {status}", show_alert=True)
         return await show_admin_panel(update, context)
 
     # ── ADMIN ──
@@ -2671,8 +2858,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
     def _validate_cookie(c: str):
-        s = requests.Session()
-        s.cookies[".ROBLOSECURITY"] = c
+        s = _make_roblox_session(c)
         return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
 
     r = await loop.run_in_executor(executor, _validate_cookie, cookie)
