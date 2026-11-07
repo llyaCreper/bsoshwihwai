@@ -1823,7 +1823,8 @@ def xrocket_create_invoice(amount: float, attempts: int):
     Создаёт инвойс xRocket Pay API v2 (новый API).
     Endpoint: POST https://pay.api.xrocket.exchange/api/v1/invoices
     Auth: Authorization: Bearer TOKEN
-    Response: { id, links: { web_link, ... }, status, ... }
+    Response: { success: true, data: { id, link, status, ... } }
+    Docs: https://docs.xrocket.exchange/api/pay/reference/http/invoice-controller-create-invoice
     """
     if not XROCKET_TOKEN:
         return None
@@ -1836,7 +1837,7 @@ def xrocket_create_invoice(amount: float, attempts: int):
                 "Accept":        "application/json",
             },
             json={
-                "amount":      str(round(amount, 2)),
+                "amount":      round(amount, 2),   # число, не строка
                 "currency":    "USDT",
                 "description": f"Roblox Bot: {attempts} попыток 2FA",
                 "numPayments": 1,
@@ -1845,15 +1846,22 @@ def xrocket_create_invoice(amount: float, attempts: int):
         )
         logging.info("xRocket create invoice status=%s body=%s", r.status_code, r.text[:300])
         if r.status_code in (200, 201):
-            inv = r.json()
-            # Новый API возвращает объект напрямую (не обёрнут в data/success)
-            # links.web_link — ссылка для оплаты
-            links    = inv.get("links") or {}
-            pay_url  = (links.get("web_link") or links.get("webLink") or
-                        inv.get("payUrl") or inv.get("link") or inv.get("url") or "")
-            inv_id   = str(inv.get("id") or inv.get("invoiceId") or "")
+            body = r.json()
+            # Pay API v2 оборачивает ответ в { success, data }
+            # data.link — прямая ссылка для оплаты (не links.web_link)
+            inv = body.get("data") or body  # fallback если вдруг без обёртки
+            pay_url = (
+                inv.get("link")
+                or inv.get("payUrl")
+                or inv.get("url")
+                # старый legacy-формат на случай если токен ещё на Legacy API
+                or (inv.get("links") or {}).get("web_link")
+                or (inv.get("links") or {}).get("webLink")
+                or ""
+            )
+            inv_id = str(inv.get("id") or inv.get("invoiceId") or "")
             if not pay_url or not inv_id:
-                logging.warning("xRocket: нет pay_url или id в ответе: %s", inv)
+                logging.warning("xRocket: нет pay_url или id в ответе: %s", body)
                 return None
             return {"invoice_id": inv_id, "pay_url": pay_url}
         logging.warning("xRocket create error %s: %s", r.status_code, r.text[:300])
@@ -1867,7 +1875,7 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
     """
     Проверяет статус инвойса xRocket Pay API v2.
     GET https://pay.api.xrocket.exchange/api/v1/invoices/{id}
-    Response: { status: "active" | "paid" | "expired" | ... }
+    Response: { success: true, data: { id, status: "active"|"paid"|"expired", ... } }
     """
     if not XROCKET_TOKEN:
         return None
@@ -1881,7 +1889,9 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
             timeout=15,
         )
         if r.status_code == 200:
-            inv    = r.json()
+            body = r.json()
+            # Pay API v2 оборачивает ответ в { success, data }
+            inv    = body.get("data") or body  # fallback если вдруг без обёртки
             status = (inv.get("status") or "").lower()
             return "paid" if status in ("paid", "completed", "success") else status
         logging.warning("xRocket check error %s: %s", r.status_code, r.text[:200])
@@ -2109,22 +2119,20 @@ async def _show_payment_method_screen(query, user_id: int, count: int, total: fl
     if lang == "ru":
         text = (
             f"💳 *Выберите способ оплаты*\n\n"
-            f"Инвойс: `0`\n"
             f"Попыток: *{count}*\n"
             f"Сумма: *${total:.2f}*\n"
             f"Скидка: {disc_str}\n\n"
-            f"Нажмите кнопку ниже для оплаты в USD.\n"
-            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
+            f"Выберите кнопку ниже для выбора способа оплаты.\n"
+            f"Инвойс будет создан автоматически после выбора метода."
         )
     else:
         text = (
             f"💳 *Choose payment method*\n\n"
-            f"Invoice: `0`\n"
             f"Attempts: *{count}*\n"
             f"Amount: *${total:.2f}*\n"
             f"Discount: {disc_str}\n\n"
-            f"Tap a button below to pay in USD.\n"
-            f"After payment tap «I paid», attempts will be credited immediately."
+            f"Select a payment method below.\n"
+            f"An invoice will be created automatically after you choose."
         )
     method_buttons = []
     if CRYPTO_BOT_TOKEN:
@@ -2364,8 +2372,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "sub", "user_id": user_id,
             "days": days, "price": price, "desc": desc,
         }
+        inv_number = raw["invoice_id"]
+        lang = db_get_lang(user_id) or "ru"
+        method_label = "CryptoBot" if method == "cb" else "xRocket"
+        if lang == "ru":
+            sub_text = (
+                f"💳 *Оплата через {method_label}*\n\n"
+                f"Инвойс: `{inv_number}`\n"
+                f"Подписка: *{desc}*\n"
+                f"Сумма: *${price}*\n\n"
+                f"Нажмите кнопку ниже для оплаты.\n"
+                f"После оплаты нажмите «Я оплатил»."
+            )
+        else:
+            sub_text = (
+                f"💳 *Payment via {method_label}*\n\n"
+                f"Invoice: `{inv_number}`\n"
+                f"Subscription: *{desc}*\n"
+                f"Amount: *${price}*\n\n"
+                f"Tap the button below to pay.\n"
+                f"After payment tap «I paid»."
+            )
         await query.edit_message_text(
-            f"Счёт на подписку: {desc}\nСумма: ${price}",
+            sub_text,
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(t(user_id, "btn_pay"),       url=pay_url)],
                 [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
@@ -2806,22 +2836,20 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lang == "ru":
             text_msg = (
                 f"💳 *Выберите способ оплаты*\n\n"
-                f"Инвойс: `0`\n"
                 f"Попыток: *{count}*\n"
                 f"Сумма: *${total:.2f}*\n"
                 f"Скидка: {disc_str}\n\n"
-                f"Нажмите кнопку ниже для оплаты в USD.\n"
-                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
+                f"Выберите кнопку ниже для выбора способа оплаты.\n"
+                f"Инвойс будет создан автоматически после выбора метода."
             )
         else:
             text_msg = (
                 f"💳 *Choose payment method*\n\n"
-                f"Invoice: `0`\n"
                 f"Attempts: *{count}*\n"
                 f"Amount: *${total:.2f}*\n"
                 f"Discount: {disc_str}\n\n"
-                f"Tap a button below to pay in USD.\n"
-                f"After payment tap «I paid», attempts will be credited immediately."
+                f"Select a payment method below.\n"
+                f"An invoice will be created automatically after you choose."
             )
         method_buttons = []
         if CRYPTO_BOT_TOKEN:
@@ -3105,11 +3133,15 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
     def _validate_cookie(c: str):
-        s = _make_roblox_session(c)
-        return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+        try:
+            s = _make_roblox_session(c)
+            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
+        except Exception as exc:
+            logging.warning("_validate_cookie network error: %s", exc)
+            return None
 
     r = await loop.run_in_executor(executor, _validate_cookie, cookie)
-    if r.status_code != 200:
+    if r is None or r.status_code != 200:
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
 
