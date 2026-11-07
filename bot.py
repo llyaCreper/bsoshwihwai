@@ -95,73 +95,77 @@ def _load_proxy_pool() -> list[str]:
 def _parse_proxy(proxy_str: str) -> dict | None:
     """
     Парсит строку прокси в формат для requests.
-    Поддерживает все форматы VProxy и других провайдеров:
-      hostname:port:login:password      ← формат VProxy (рекомендуется)
+    Поддерживаемые форматы:
+      hostname:port:login:password      <- основной (пароль может содержать : и @)
       hostname:port@login:password
-      login:password:hostname:port
       login:password@hostname:port
-      hostname:port
-      socks5://login:pass@hostname:port
+      login:password:hostname:port
+      hostname:port                     <- без авторизации
+      socks5://login:pass@hostname:port <- готовый URL
       http://login:pass@hostname:port
-    Протокол берётся из env PROXY_PROTOCOL (по умолчанию http).
+    Протокол задаётся через env PROXY_PROTOCOL (по умолчанию http).
     """
+    from urllib.parse import quote as _quote
     s = proxy_str.strip()
     if not s:
         return None
 
-    # Протокол: из env или http по умолчанию
     protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
 
-    # Уже готовый URL-формат — используем как есть
+    # Уже готовый URL — используем напрямую
     if s.startswith(("http://", "https://", "socks5://", "socks4://")):
         return {"http": s, "https": s}
 
     parts = s.split(":")
 
-    if len(parts) == 4:
-        a, b, c, d = parts
-
-        # hostname:port:login:password — порт это число во 2й позиции
-        if b.isdigit():
-            host, port, login, password = a, b, c, d
-        # login:password:hostname:port — порт это число в 4й позиции
-        elif d.isdigit():
-            login, password, host, port = a, b, c, d
-        else:
-            logging.warning("Неизвестный формат прокси (4 части): %s", s)
-            return None
-
-        url = f"{protocol}://{login}:{password}@{host}:{port}"
+    # ПРИОРИТЕТ 1: hostname:port:login:password — parts[1] число
+    # Пароль — всё остальное (может содержать : и @)
+    if len(parts) >= 4 and parts[1].isdigit():
+        host     = parts[0]
+        port     = parts[1]
+        login    = parts[2]
+        password = ":".join(parts[3:])
+        url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
         return {"http": url, "https": url}
 
-    # Формат hostname:port@login:password или login:password@hostname:port
-    if len(parts) == 3 and "@" in s:
-        left, right = s.split("@", 1)
-        left_parts  = left.split(":")
-        right_parts = right.split(":")
+    # ПРИОРИТЕТ 2: login:password:hostname:port — parts[-1] число
+    if len(parts) >= 4 and parts[-1].isdigit():
+        host     = parts[-2]
+        port     = parts[-1]
+        login    = parts[0]
+        password = ":".join(parts[1:-2])
+        url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
+        return {"http": url, "https": url}
+
+    # ПРИОРИТЕТ 3: формат с @ как разделителем
+    if "@" in s:
+        at_idx = s.index("@")
+        left   = s[:at_idx]
+        right  = s[at_idx + 1:]
+        lp     = left.split(":")
+        rp     = right.split(":")
         # hostname:port @ login:password
-        if len(left_parts) == 2 and left_parts[1].isdigit():
-            host, port = left_parts
-            login, password = right_parts[0], right_parts[1] if len(right_parts) > 1 else ""
+        if len(lp) == 2 and lp[1].isdigit():
+            host, port = lp[0], lp[1]
+            login      = rp[0]
+            password   = ":".join(rp[1:]) if len(rp) > 1 else ""
+            url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
+            return {"http": url, "https": url}
         # login:password @ hostname:port
-        elif len(right_parts) == 2 and right_parts[1].isdigit():
-            login, password = left_parts[0], left_parts[1] if len(left_parts) > 1 else ""
-            host, port = right_parts
-        else:
-            logging.warning("Неизвестный формат прокси (@): %s", s)
-            return None
-        url = f"{protocol}://{login}:{password}@{host}:{port}"
-        return {"http": url, "https": url}
+        elif len(rp) >= 2 and rp[-1].isdigit():
+            host     = rp[-2]
+            port     = rp[-1]
+            login    = lp[0]
+            password = ":".join(lp[1:]) if len(lp) > 1 else ""
+            url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
+            return {"http": url, "https": url}
 
-    # Формат hostname:port (без авторизации)
+    # hostname:port без авторизации
     if len(parts) == 2 and parts[1].isdigit():
-        url = f"{protocol}://{s}"
-        return {"http": url, "https": url}
+        return {"http": f"{protocol}://{s}", "https": f"{protocol}://{s}"}
 
     logging.warning("Неизвестный формат прокси: %s", s)
     return None
-
-
 def get_next_proxy() -> dict | None:
     """Возвращает следующий прокси из пула (round-robin). None если пул пуст."""
     global _proxy_index
@@ -1153,7 +1157,7 @@ TEXTS = {
         "pay_method_unavail":"❌ Способ оплаты недоступен. Обратитесь в поддержку.",
         "pay_ok":            "*Оплата получена!*\nНачислено *{attempts}* попыток\nВсего: *{total}*",
         "pay_pending":       "Оплата ещё не получена. Попробуй позже.",
-        "pay_error":         "Ошибка создания счёта!",
+        "pay_error":         "❌ Ошибка создания счёта! Попробуйте другой способ оплаты или обратитесь к администратору.",
         "lang_set":          "✅ Язык установлен: Русский",
         "ask_2fa":           "На каком аккаунте получить ссылку?",
         "btn_no_2fa":        "🔓 Без 2FA",
@@ -1241,7 +1245,7 @@ TEXTS = {
         "pay_method_unavail":"❌ Payment method unavailable. Contact support.",
         "pay_ok":            "*Payment received!*\nAdded *{attempts}* attempts\nTotal: *{total}*",
         "pay_pending":       "Payment not received yet. Try later.",
-        "pay_error":         "Invoice creation error!",
+        "pay_error":         "❌ Invoice creation error! Try another payment method or contact support.",
         "lang_set":          "✅ Language set: English",
         "ask_2fa":           "Which account type do you want to verify?",
         "btn_no_2fa":        "🔓 Without 2FA",
@@ -1818,16 +1822,46 @@ def check_invoice(invoice_id):
 
 # ──────────────────────────── xRocket ────────────────────────────
 
+def _xrocket_extract_invoice(body: dict) -> dict | None:
+    """
+    Универсальный парсер ответа xRocket — покрывает Legacy и Pay API v2.
+    Legacy:  { success: true, data: { id, link, ... } }  — поле 'link'
+    Pay API v2: { success: true, data: { id, link, links: { web_link } } }
+    Или без обёртки: { id, link, ... }
+    """
+    # Пробуем развернуть обёртку { success, data }
+    if isinstance(body.get("data"), dict):
+        inv = body["data"]
+    else:
+        inv = body  # ответ без обёртки
+
+    pay_url = (
+        inv.get("link")
+        or inv.get("payUrl")
+        or inv.get("url")
+        or (inv.get("links") or {}).get("web_link")
+        or (inv.get("links") or {}).get("webLink")
+        or ""
+    )
+    inv_id = str(inv.get("id") or inv.get("invoiceId") or "")
+    if pay_url and inv_id:
+        return {"invoice_id": inv_id, "pay_url": pay_url}
+    return None
+
+
 def xrocket_create_invoice(amount: float, attempts: int):
     """
-    Создаёт инвойс xRocket Pay API v2 (новый API).
-    Endpoint: POST https://pay.api.xrocket.exchange/api/v1/invoices
-    Auth: Authorization: Bearer TOKEN
-    Response: { success: true, data: { id, link, status, ... } }
-    Docs: https://docs.xrocket.exchange/api/pay/reference/http/invoice-controller-create-invoice
+    Создаёт инвойс xRocket.
+    Пробует оба API:
+      1) Pay API v2  — pay.api.xrocket.exchange  — Authorization: Bearer TOKEN
+      2) Legacy API  — pay.xrocket.tg            — Rocket-Pay-Key: TOKEN
+    Логирует ПОЛНЫЙ ответ при ошибке чтобы было видно что не так.
     """
     if not XROCKET_TOKEN:
+        logging.warning("xRocket: токен не задан (XROCKET_TOKEN пуст)")
         return None
+
+    # ── 1. Pay API v2 (новый) ──
     try:
         r = requests.post(
             "https://pay.api.xrocket.exchange/api/v1/invoices",
@@ -1837,48 +1871,73 @@ def xrocket_create_invoice(amount: float, attempts: int):
                 "Accept":        "application/json",
             },
             json={
-                "amount":      round(amount, 2),   # число, не строка
+                "amount":      round(amount, 2),
                 "currency":    "USDT",
                 "description": f"Roblox Bot: {attempts} попыток 2FA",
                 "numPayments": 1,
             },
             timeout=15,
         )
-        logging.info("xRocket create invoice status=%s body=%s", r.status_code, r.text[:300])
+        logging.info("[xRocket v2] status=%s body=%s", r.status_code, r.text[:500])
         if r.status_code in (200, 201):
-            body = r.json()
-            # Pay API v2 оборачивает ответ в { success, data }
-            # data.link — прямая ссылка для оплаты (не links.web_link)
-            inv = body.get("data") or body  # fallback если вдруг без обёртки
-            pay_url = (
-                inv.get("link")
-                or inv.get("payUrl")
-                or inv.get("url")
-                # старый legacy-формат на случай если токен ещё на Legacy API
-                or (inv.get("links") or {}).get("web_link")
-                or (inv.get("links") or {}).get("webLink")
-                or ""
-            )
-            inv_id = str(inv.get("id") or inv.get("invoiceId") or "")
-            if not pay_url or not inv_id:
-                logging.warning("xRocket: нет pay_url или id в ответе: %s", body)
-                return None
-            return {"invoice_id": inv_id, "pay_url": pay_url}
-        logging.warning("xRocket create error %s: %s", r.status_code, r.text[:300])
-        return None
+            result = _xrocket_extract_invoice(r.json())
+            if result:
+                logging.info("[xRocket v2] инвойс создан: %s", result)
+                return result
+            logging.warning("[xRocket v2] ответ 2xx но нет ссылки/id: %s", r.text[:500])
+        else:
+            logging.warning("[xRocket v2] ошибка %s: %s", r.status_code, r.text[:500])
     except Exception as e:
-        logging.error("xrocket_create_invoice: %s", e)
-        return None
+        logging.error("[xRocket v2] exception: %s", e)
+
+    # ── 2. Legacy API (старый, pay.xrocket.tg) ──
+    try:
+        r = requests.post(
+            "https://pay.xrocket.tg/tg-invoices",
+            headers={
+                "Rocket-Pay-Key": XROCKET_TOKEN,
+                "Content-Type":   "application/json",
+                "Accept":         "application/json",
+            },
+            json={
+                "amount":      round(amount, 2),
+                "currency":    "USDT",
+                "description": f"Roblox Bot: {attempts} попыток 2FA",
+                "numPayments": 1,
+            },
+            timeout=15,
+        )
+        logging.info("[xRocket legacy] status=%s body=%s", r.status_code, r.text[:500])
+        if r.status_code in (200, 201):
+            result = _xrocket_extract_invoice(r.json())
+            if result:
+                logging.info("[xRocket legacy] инвойс создан: %s", result)
+                return result
+            logging.warning("[xRocket legacy] ответ 2xx но нет ссылки/id: %s", r.text[:500])
+        else:
+            logging.warning("[xRocket legacy] ошибка %s: %s", r.status_code, r.text[:500])
+    except Exception as e:
+        logging.error("[xRocket legacy] exception: %s", e)
+
+    return None
+
+
+def _xrocket_parse_status(body: dict) -> str | None:
+    """Универсальный парсер статуса — Legacy и Pay API v2."""
+    inv = body.get("data") if isinstance(body.get("data"), dict) else body
+    status = (inv.get("status") or "").lower()
+    return "paid" if status in ("paid", "completed", "success") else (status or None)
 
 
 def xrocket_check_invoice(invoice_id: str) -> str | None:
     """
-    Проверяет статус инвойса xRocket Pay API v2.
-    GET https://pay.api.xrocket.exchange/api/v1/invoices/{id}
-    Response: { success: true, data: { id, status: "active"|"paid"|"expired", ... } }
+    Проверяет статус инвойса.
+    Пробует Pay API v2, затем Legacy API.
     """
     if not XROCKET_TOKEN:
         return None
+
+    # ── 1. Pay API v2 ──
     try:
         r = requests.get(
             f"https://pay.api.xrocket.exchange/api/v1/invoices/{invoice_id}",
@@ -1888,17 +1947,33 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
             },
             timeout=15,
         )
+        logging.info("[xRocket v2 check] status=%s body=%s", r.status_code, r.text[:300])
         if r.status_code == 200:
-            body = r.json()
-            # Pay API v2 оборачивает ответ в { success, data }
-            inv    = body.get("data") or body  # fallback если вдруг без обёртки
-            status = (inv.get("status") or "").lower()
-            return "paid" if status in ("paid", "completed", "success") else status
-        logging.warning("xRocket check error %s: %s", r.status_code, r.text[:200])
-        return None
+            return _xrocket_parse_status(r.json())
+        # 404 — инвойс не найден на этом API, пробуем Legacy
+        if r.status_code != 404:
+            logging.warning("[xRocket v2 check] ошибка %s: %s", r.status_code, r.text[:300])
     except Exception as e:
-        logging.error("xrocket_check_invoice: %s", e)
-        return None
+        logging.error("[xRocket v2 check] exception: %s", e)
+
+    # ── 2. Legacy API ──
+    try:
+        r = requests.get(
+            f"https://pay.xrocket.tg/tg-invoices/{invoice_id}",
+            headers={
+                "Rocket-Pay-Key": XROCKET_TOKEN,
+                "Accept":         "application/json",
+            },
+            timeout=15,
+        )
+        logging.info("[xRocket legacy check] status=%s body=%s", r.status_code, r.text[:300])
+        if r.status_code == 200:
+            return _xrocket_parse_status(r.json())
+        logging.warning("[xRocket legacy check] ошибка %s: %s", r.status_code, r.text[:300])
+    except Exception as e:
+        logging.error("[xRocket legacy check] exception: %s", e)
+
+    return None
 
 
 async def send_log(context, user_id, username, method, elapsed_sec, has_2fa=False):
@@ -3135,13 +3210,74 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def _validate_cookie(c: str):
         try:
             s = _make_roblox_session(c)
-            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
+            resp = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
+            logging.info(
+                "_validate_cookie status=%s body=%s",
+                resp.status_code, resp.text[:300]
+            )
+            return resp
         except Exception as exc:
             logging.warning("_validate_cookie network error: %s", exc)
             return None
 
     r = await loop.run_in_executor(executor, _validate_cookie, cookie)
-    if r is None or r.status_code != 200:
+    lang = db_get_lang(user_id) or "ru"
+
+    if r is None:
+        # Сетевая ошибка — не проблема куки
+        err_text = (
+            "⚠️ Не удалось подключиться к Roblox. Попробуйте позже."
+            if lang == "ru" else
+            "⚠️ Failed to connect to Roblox. Please try again later."
+        )
+        await msg.edit_text(err_text)
+        return WAITING_MENU
+
+    if r.status_code == 403:
+        # 403 может означать: IP датацентра заблокирован Roblox, или куки истёк
+        body_text = r.text.lower()
+        if "token validation failed" in body_text or "x-csrf-token" in body_text:
+            # CSRF проблема — пробуем ещё раз с токеном
+            def _validate_cookie_csrf(c: str):
+                try:
+                    s = _make_roblox_session(c)
+                    r1 = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
+                    csrf = r1.headers.get("x-csrf-token")
+                    if csrf:
+                        s.headers["x-csrf-token"] = csrf
+                        r2 = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
+                        logging.info("_validate_cookie_csrf retry status=%s", r2.status_code)
+                        return r2
+                    return r1
+                except Exception as exc:
+                    logging.warning("_validate_cookie_csrf error: %s", exc)
+                    return None
+            r = await loop.run_in_executor(executor, _validate_cookie_csrf, cookie)
+            if r is None or r.status_code != 200:
+                await msg.edit_text(t(user_id, "invalid_cookie"))
+                return WAITING_MENU
+        elif "challenge" in body_text or "captcha" in body_text or r.status_code == 403:
+            # IP датацентра заблокирован — куки может быть верным
+            logging.warning("Roblox 403 — возможно IP датацентра заблокирован: %s", r.text[:200])
+            err_text = (
+                "⚠️ Roblox блокирует запросы с сервера. Настройте прокси (PROXY_URL) или попробуйте позже."
+                if lang == "ru" else
+                "⚠️ Roblox is blocking server requests. Configure a proxy (PROXY_URL) or try later."
+            )
+            await msg.edit_text(err_text)
+            return WAITING_MENU
+
+    if r.status_code == 429:
+        err_text = (
+            "⚠️ Roblox вернул лимит запросов (429). Подождите минуту и попробуйте снова."
+            if lang == "ru" else
+            "⚠️ Roblox rate limit (429). Wait a minute and try again."
+        )
+        await msg.edit_text(err_text)
+        return WAITING_MENU
+
+    if r.status_code != 200:
+        logging.warning("_validate_cookie unexpected status %s: %s", r.status_code, r.text[:200])
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
 
