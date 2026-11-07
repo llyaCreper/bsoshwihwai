@@ -1393,13 +1393,17 @@ def get_url_via_api(cookie: str, method: str) -> str | None:
     """Прямой вызов API для аккаунтов без 2FA."""
     try:
         s = _make_roblox_session(cookie)
-        url  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
+        api_url = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
         body = (
             {"generateLink": True, "ageEstimation": False, "parentVerification": False}
             if method == "id"
             else {"generateLink": True, "ageEstimation": True, "parentVerification": False}
         )
-        r1   = s.post(url, json=body, timeout=12)
+        r1 = s.post(api_url, json=body, timeout=12)
+        logging.info("[get_url_via_api] r1 status=%s headers=%s body=%s",
+                     r1.status_code,
+                     dict(r1.headers),
+                     r1.text[:500])
         csrf = r1.headers.get("x-csrf-token")
         if r1.status_code == 200:
             link = _extract_link(r1)
@@ -1407,12 +1411,25 @@ def get_url_via_api(cookie: str, method: str) -> str | None:
                 return link
         if csrf:
             s.headers["x-csrf-token"] = csrf
-            r2 = s.post(url, json=body, timeout=12)
+            r2 = s.post(api_url, json=body, timeout=12)
+            logging.info("[get_url_via_api] r2 status=%s body=%s",
+                         r2.status_code, r2.text[:500])
             if r2.status_code == 200:
                 return _extract_link(r2)
+            # Детектируем 2FA чтобы не путать с ошибкой сети
+            if r2.status_code == 403:
+                ctype = r2.headers.get("rblx-challenge-type", "")
+                if ctype == "twostepverification":
+                    logging.info("[get_url_via_api] аккаунт требует 2FA (403 twostepverification)")
+                    return "__needs_2fa__"
+        elif r1.status_code == 403:
+            ctype = r1.headers.get("rblx-challenge-type", "")
+            if ctype == "twostepverification":
+                logging.info("[get_url_via_api] аккаунт требует 2FA (403 twostepverification) r1")
+                return "__needs_2fa__"
         return None
     except Exception as e:
-        logging.error("API error: %s", e)
+        logging.error("[get_url_via_api] exception: %s", e)
         return None
 
 
@@ -3314,6 +3331,23 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем напрямую: если на аккаунте нет 2FA, Roblox выдаст ссылку за 1-2 сек бесплатно!
     fast_link = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
     elapsed = round(_time.time() - _start_time)
+
+    # None = сетевая ошибка / API недоступен — НЕ значит что есть 2FA
+    # "__needs_2fa__" = Roblox явно сказал что нужна 2FA
+    if fast_link is None:
+        # Не можем определить наличие 2FA — сообщаем об ошибке сети
+        lang = db_get_lang(user_id) or "ru"
+        err_text = (
+            "⚠️ Не удалось обратиться к Roblox API. Проверьте прокси или попробуйте позже."
+            if lang == "ru" else
+            "⚠️ Failed to reach Roblox API. Check proxy settings or try again later."
+        )
+        await msg.edit_text(err_text)
+        return WAITING_MENU
+
+    # Явный сигнал от Roblox что нужна 2FA
+    if fast_link == "__needs_2fa__":
+        fast_link = None  # дальше обрабатывается как "нет быстрой ссылки"
 
     if fast_link and _is_persona_link(fast_link):
         logging.info("Ссылка получена быстро (на аккаунте нет 2FA) за %s сек — бесплатно", elapsed)
