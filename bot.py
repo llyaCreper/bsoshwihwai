@@ -96,75 +96,94 @@ def _parse_proxy(proxy_str: str) -> dict | None:
     """
     Парсит строку прокси в формат для requests.
     Поддерживаемые форматы:
-      hostname:port:login:password      <- основной (пароль может содержать : и @)
-      hostname:port@login:password
-      login:password@hostname:port
-      login:password:hostname:port
-      hostname:port                     <- без авторизации
-      socks5://login:pass@hostname:port <- готовый URL
-      http://login:pass@hostname:port
+      socks5://host:port:rotation_key;login:password  <- VProxy ротационный (основной)
+      socks5://login:pass@host:port                   <- готовый URL
+      http://login:pass@host:port
+      host:port:login:password                        <- пароль может содержать : и @
+      host:port@login:password
+      login:password@host:port
+      login:password:host:port
+      host:port                                       <- без авторизации
     Протокол задаётся через env PROXY_PROTOCOL (по умолчанию http).
     """
-    from urllib.parse import quote as _quote
+    from urllib.parse import quote as _q
     s = proxy_str.strip()
     if not s:
         return None
 
-    protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
+    # Определяем протокол из строки или env
+    protocol = "http"
+    rest = s
+    for scheme in ("socks5://", "socks4://", "https://", "http://"):
+        if s.lower().startswith(scheme):
+            protocol = scheme.rstrip(":/")
+            rest = s[len(scheme):]
+            break
+    else:
+        protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
 
-    # Уже готовый URL — используем напрямую
-    if s.startswith(("http://", "https://", "socks5://", "socks4://")):
-        return {"http": s, "https": s}
-
-    parts = s.split(":")
-
-    # ПРИОРИТЕТ 1: hostname:port:login:password — parts[1] число
-    # Пароль — всё остальное (может содержать : и @)
-    if len(parts) >= 4 and parts[1].isdigit():
-        host     = parts[0]
-        port     = parts[1]
-        login    = parts[2]
-        password = ":".join(parts[3:])
-        url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
-        return {"http": url, "https": url}
-
-    # ПРИОРИТЕТ 2: login:password:hostname:port — parts[-1] число
-    if len(parts) >= 4 and parts[-1].isdigit():
-        host     = parts[-2]
-        port     = parts[-1]
-        login    = parts[0]
-        password = ":".join(parts[1:-2])
-        url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
-        return {"http": url, "https": url}
-
-    # ПРИОРИТЕТ 3: формат с @ как разделителем
-    if "@" in s:
-        at_idx = s.index("@")
-        left   = s[:at_idx]
-        right  = s[at_idx + 1:]
-        lp     = left.split(":")
-        rp     = right.split(":")
-        # hostname:port @ login:password
-        if len(lp) == 2 and lp[1].isdigit():
-            host, port = lp[0], lp[1]
-            login      = rp[0]
-            password   = ":".join(rp[1:]) if len(rp) > 1 else ""
-            url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
+    # ── ФОРМАТ VPROXY: host:port:rotation_key;login:password ──
+    # Признак: ";" есть в строке — разделяет ключ ротации от логина
+    if ";" in rest:
+        before, after = rest.split(";", 1)
+        parts = before.split(":")
+        if len(parts) >= 2 and parts[1].isdigit():
+            host = parts[0]
+            port = parts[1]
+            # rotation_key = ":".join(parts[2:])  — нам не нужен
+            creds = after.split(":", 1)
+            login    = creds[0]
+            password = creds[1] if len(creds) > 1 else ""
+            url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
             return {"http": url, "https": url}
-        # login:password @ hostname:port
-        elif len(rp) >= 2 and rp[-1].isdigit():
-            host     = rp[-2]
-            port     = rp[-1]
+
+    # ── ФОРМАТ С @: host:port@login:password или login:password@host:port ──
+    if "@" in rest:
+        at = rest.index("@")
+        left, right = rest[:at], rest[at+1:]
+        lp, rp = left.split(":"), right.split(":")
+        if len(lp) == 2 and lp[1].isdigit():          # host:port @ login:password
+            host, port = lp
+            login    = rp[0]
+            password = ":".join(rp[1:]) if len(rp) > 1 else ""
+        elif len(rp) >= 2 and rp[-1].isdigit():        # login:password @ host:port
+            host, port = rp[-2], rp[-1]
             login    = lp[0]
             password = ":".join(lp[1:]) if len(lp) > 1 else ""
-            url = f"{protocol}://{_quote(login, safe='')}:{_quote(password, safe='')}@{host}:{port}"
-            return {"http": url, "https": url}
+        else:
+            # Готовый URL вида socks5://user:pass@host:port уже разобран выше
+            # Если дошли сюда — не можем распознать
+            import logging as _l
+            _l.warning("Неизвестный формат прокси (@): %s", s)
+            return None
+        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
+        return {"http": url, "https": url}
 
-    # hostname:port без авторизации
+    # ── БЕЗ @ И БЕЗ ; — разбираем по : ──
+    parts = rest.split(":")
+
+    # host:port — 2 части
     if len(parts) == 2 and parts[1].isdigit():
-        return {"http": f"{protocol}://{s}", "https": f"{protocol}://{s}"}
+        return {"http": f"{protocol}://{rest}", "https": f"{protocol}://{rest}"}
 
-    logging.warning("Неизвестный формат прокси: %s", s)
+    # host:port:login:password  (password может содержать :)
+    if len(parts) >= 4 and parts[1].isdigit():
+        host, port = parts[0], parts[1]
+        login    = parts[2]
+        password = ":".join(parts[3:])
+        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
+        return {"http": url, "https": url}
+
+    # login:password:host:port
+    if len(parts) >= 4 and parts[-1].isdigit():
+        host, port = parts[-2], parts[-1]
+        login    = parts[0]
+        password = ":".join(parts[1:-2])
+        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
+        return {"http": url, "https": url}
+
+    import logging as _l
+    _l.warning("Неизвестный формат прокси: %s", s)
     return None
 def get_next_proxy() -> dict | None:
     """Возвращает следующий прокси из пула (round-robin). None если пул пуст."""
