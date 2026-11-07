@@ -1108,11 +1108,11 @@ TEXTS = {
         "sub_bought":        "✅ Подписка активирована!\n{desc}",
         "help_text": (
             "📖 *Инструкция*\n\n"
-            "┌─ 📷 *Ссылка Camera \\(Face\\)* — $1\\.0\n"
+            "┌─ 📷 *Ссылка Camera (Face)* — $1.0\n"
             "│   • Persona\\-ссылка для селфи\n"
             "│   • Метод: прямая ссылка\n"
             "└─ • Время: 30 секунд\n\n"
-            "┌─ 🪪 *Ссылка ID \\(Паспорт\\)* — $1\\.0\n"
+            "┌─ 🪪 *Ссылка ID (Паспорт)* — $1.0\n"
             "│   • Persona\\-ссылка для документов\n"
             "│   • Метод: прямая ссылка\n"
             "└─ • Время: 30 секунд\n\n"
@@ -1196,11 +1196,11 @@ TEXTS = {
         "sub_bought":        "✅ Subscription activated!\n{desc}",
         "help_text": (
             "📖 *Instructions*\n\n"
-            "┌─ 📷 *Camera Link \\(Face\\)* — $1\\.0\n"
+            "┌─ 📷 *Camera Link (Face)* — $1.0\n"
             "│   • Persona link for selfie\n"
             "│   • Method: direct link\n"
             "└─ • Time: 30 seconds\n\n"
-            "┌─ 🪪 *ID Link \\(Passport\\)* — $1\\.0\n"
+            "┌─ 🪪 *ID Link (Passport)* — $1.0\n"
             "│   • Persona link for documents\n"
             "│   • Method: direct link\n"
             "└─ • Time: 30 seconds\n\n"
@@ -1819,37 +1819,44 @@ def check_invoice(invoice_id):
 # ──────────────────────────── xRocket ────────────────────────────
 
 def xrocket_create_invoice(amount: float, attempts: int):
-    """Создаёт инвойс в xRocket (USDT TRC-20). Возвращает dict с id и pay_url или None."""
+    """
+    Создаёт инвойс xRocket Pay API v2 (новый API).
+    Endpoint: POST https://pay.api.xrocket.exchange/api/v1/invoices
+    Auth: Authorization: Bearer TOKEN
+    Response: { id, links: { web_link, ... }, status, ... }
+    """
     if not XROCKET_TOKEN:
         return None
     try:
         r = requests.post(
-            "https://pay.ton-rocket.com/app/invoices",
+            "https://pay.api.xrocket.exchange/api/v1/invoices",
             headers={
-                "Rocket-Pay-Key": XROCKET_TOKEN,
-                "Content-Type":   "application/json",
+                "Authorization": f"Bearer {XROCKET_TOKEN}",
+                "Content-Type":  "application/json",
+                "Accept":        "application/json",
             },
             json={
-                "amount":      round(amount, 2),
+                "amount":      str(round(amount, 2)),
                 "currency":    "USDT",
                 "description": f"Roblox Bot: {attempts} попыток 2FA",
-                "expiredIn":   300,
+                "numPayments": 1,
             },
             timeout=15,
         )
-        data = r.json()
-        if data.get("success") and data.get("data"):
-            inv = data["data"]
-            # xRocket Pay API v2 возвращает payUrl; v1 — link. Поддерживаем оба.
-            pay_url = inv.get("payUrl") or inv.get("link") or inv.get("pay_url") or inv.get("url") or ""
-            if not pay_url:
-                logging.warning("xRocket: нет pay_url в ответе: %s", inv)
+        logging.info("xRocket create invoice status=%s body=%s", r.status_code, r.text[:300])
+        if r.status_code in (200, 201):
+            inv = r.json()
+            # Новый API возвращает объект напрямую (не обёрнут в data/success)
+            # links.web_link — ссылка для оплаты
+            links    = inv.get("links") or {}
+            pay_url  = (links.get("web_link") or links.get("webLink") or
+                        inv.get("payUrl") or inv.get("link") or inv.get("url") or "")
+            inv_id   = str(inv.get("id") or inv.get("invoiceId") or "")
+            if not pay_url or not inv_id:
+                logging.warning("xRocket: нет pay_url или id в ответе: %s", inv)
                 return None
-            return {
-                "invoice_id": str(inv.get("id") or inv.get("invoiceId") or ""),
-                "pay_url":    pay_url,
-            }
-        logging.warning("xRocket create error: %s", data)
+            return {"invoice_id": inv_id, "pay_url": pay_url}
+        logging.warning("xRocket create error %s: %s", r.status_code, r.text[:300])
         return None
     except Exception as e:
         logging.error("xrocket_create_invoice: %s", e)
@@ -1857,21 +1864,27 @@ def xrocket_create_invoice(amount: float, attempts: int):
 
 
 def xrocket_check_invoice(invoice_id: str) -> str | None:
-    """Проверяет статус инвойса xRocket. Возвращает 'paid' / 'active' / None."""
+    """
+    Проверяет статус инвойса xRocket Pay API v2.
+    GET https://pay.api.xrocket.exchange/api/v1/invoices/{id}
+    Response: { status: "active" | "paid" | "expired" | ... }
+    """
     if not XROCKET_TOKEN:
         return None
     try:
         r = requests.get(
-            f"https://pay.ton-rocket.com/app/invoices/{invoice_id}",
-            headers={"Rocket-Pay-Key": XROCKET_TOKEN},
+            f"https://pay.api.xrocket.exchange/api/v1/invoices/{invoice_id}",
+            headers={
+                "Authorization": f"Bearer {XROCKET_TOKEN}",
+                "Accept":        "application/json",
+            },
             timeout=15,
         )
-        data = r.json()
-        if data.get("success") and data.get("data"):
-            inv  = data["data"]
-            # xRocket возвращает status как "PAID", "ACTIVE", "EXPIRED" и т.д.
-            status = (inv.get("status") or inv.get("statusText") or "").lower()
+        if r.status_code == 200:
+            inv    = r.json()
+            status = (inv.get("status") or "").lower()
             return "paid" if status in ("paid", "completed", "success") else status
+        logging.warning("xRocket check error %s: %s", r.status_code, r.text[:200])
         return None
     except Exception as e:
         logging.error("xrocket_check_invoice: %s", e)
@@ -2100,8 +2113,8 @@ async def _show_payment_method_screen(query, user_id: int, count: int, total: fl
             f"Попыток: *{count}*\n"
             f"Сумма: *${total:.2f}*\n"
             f"Скидка: {disc_str}\n\n"
-            f"Нажмите кнопку ниже для оплаты в USD\\.\n"
-            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+            f"Нажмите кнопку ниже для оплаты в USD.\n"
+            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
         )
     else:
         text = (
@@ -2110,8 +2123,8 @@ async def _show_payment_method_screen(query, user_id: int, count: int, total: fl
             f"Attempts: *{count}*\n"
             f"Amount: *${total:.2f}*\n"
             f"Discount: {disc_str}\n\n"
-            f"Tap a button below to pay in USD\\.\n"
-            f"After payment tap «I paid», attempts will be credited immediately\\."
+            f"Tap a button below to pay in USD.\n"
+            f"After payment tap «I paid», attempts will be credited immediately."
         )
     method_buttons = []
     if CRYPTO_BOT_TOKEN:
@@ -2228,8 +2241,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• 5 попыток: *10%*\n"
                 "• 10 попыток: *15%*\n"
                 "• 25 попыток: *25%*\n\n"
-                "_Скидка действует только при выборе кнопки\\.\n"
-                "При своём количестве скидки нет\\._\n\n"
+                "_Скидка действует только при выборе кнопки.\n"
+                "При своём количестве скидки нет._\n\n"
                 "Выберите количество или введите число:"
             )
         else:
@@ -2240,8 +2253,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• 5 attempts: *10%*\n"
                 "• 10 attempts: *15%*\n"
                 "• 25 attempts: *25%*\n\n"
-                "_Discount applies only to package buttons\\.\n"
-                "Custom amount has no discount\\._\n\n"
+                "_Discount applies only to package buttons.\n"
+                "Custom amount has no discount._\n\n"
                 "Choose a package or type a number:"
             )
         context.user_data["waiting"] = "custom_buy_count"
@@ -2447,8 +2460,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Попыток: *{count}*\n"
                 f"Сумма: *${total:.2f}*\n"
                 f"Скидка: {disc_str}\n\n"
-                f"Нажмите кнопку ниже для оплаты в USD\\.\n"
-                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+                f"Нажмите кнопку ниже для оплаты в USD.\n"
+                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
             )
             btn_paid = "✅ Я оплатил"
         else:
@@ -2458,8 +2471,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Attempts: *{count}*\n"
                 f"Amount: *${total:.2f}*\n"
                 f"Discount: {disc_str}\n\n"
-                f"Tap the button below to pay in USD\\.\n"
-                f"After payment tap «I paid», attempts will be credited immediately\\."
+                f"Tap the button below to pay in USD.\n"
+                f"After payment tap «I paid», attempts will be credited immediately."
             )
             btn_paid = "✅ I paid"
 
@@ -2797,8 +2810,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Попыток: *{count}*\n"
                 f"Сумма: *${total:.2f}*\n"
                 f"Скидка: {disc_str}\n\n"
-                f"Нажмите кнопку ниже для оплаты в USD\\.\n"
-                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+                f"Нажмите кнопку ниже для оплаты в USD.\n"
+                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
             )
         else:
             text_msg = (
@@ -2807,8 +2820,8 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Attempts: *{count}*\n"
                 f"Amount: *${total:.2f}*\n"
                 f"Discount: {disc_str}\n\n"
-                f"Tap a button below to pay in USD\\.\n"
-                f"After payment tap «I paid», attempts will be credited immediately\\."
+                f"Tap a button below to pay in USD.\n"
+                f"After payment tap «I paid», attempts will be credited immediately."
             )
         method_buttons = []
         if CRYPTO_BOT_TOKEN:
