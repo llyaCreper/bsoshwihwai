@@ -362,7 +362,7 @@ def get_bot_token() -> str:
 
 _WORKER_URLS = [
     u.strip() for u in [
-        os.environ.get("WORKER_1_URL", "http://127.0.0.1:8080"),
+        os.environ.get("WORKER_1_URL", ""),
         os.environ.get("WORKER_2_URL", ""),
         os.environ.get("WORKER_3_URL", ""),
         os.environ.get("WORKER_4_URL", ""),
@@ -534,8 +534,8 @@ WAITING_ADMIN_BROADCAST             = 14
 WAITING_2FA_CODE                    = 15
 WAITING_ADMIN_CHANGE_PASSWORD       = 16
 
-PRICE_2FA     = 1.00
-DISCOUNTS_2FA = {5: 0.05, 10: 0.10, 15: 0.15, 25: 0.20}
+PRICE_2FA     = 3.00
+DISCOUNTS_2FA = {5: 0.10, 10: 0.15, 25: 0.25}
 SUBSCRIPTIONS = {1: 3.00, 3: 5.00, 7: 10.00, 30: 25.00, 0: 50.00}
 
 # ──────────────────────────── DATABASE (connection pool) ────────────────────────────
@@ -1092,11 +1092,9 @@ TEXTS = {
         "btn_admin":         "Админ панель",
         "btn_back":          "Назад",
         "btn_cancel":        "Отмена",
-        "btn_buy_1":         "1 попытка 2FA — $1.00",
-        "btn_buy_5":         "5 попыток 2FA — $4.75 (−5%)",
-        "btn_buy_10":        "10 попыток 2FA — $9.00 (−10%)",
-        "btn_buy_15":        "15 попыток 2FA — $12.75 (−15%)",
-        "btn_buy_25":        "25 попыток 2FA — $20.00 (−20%)",
+        "btn_buy_5":         "5 попыток — $13.50 (−10%)",
+        "btn_buy_10":        "10 попыток — $25.50 (−15%)",
+        "btn_buy_25":        "25 попыток — $56.25 (−25%)",
         "btn_sub_1d":        "📅 1 день — $3.00",
         "btn_sub_3d":        "📅 3 дня — $5.00",
         "btn_sub_7d":        "📅 7 дней — $10.00",
@@ -1182,11 +1180,9 @@ TEXTS = {
         "btn_admin":         "Admin panel",
         "btn_back":          "Back",
         "btn_cancel":        "Cancel",
-        "btn_buy_1":         "1 2FA attempt — $1.00",
-        "btn_buy_5":         "5 2FA attempts — $4.75 (−5%)",
-        "btn_buy_10":        "10 2FA attempts — $9.00 (−10%)",
-        "btn_buy_15":        "15 2FA attempts — $12.75 (−15%)",
-        "btn_buy_25":        "25 2FA attempts — $20.00 (−20%)",
+        "btn_buy_5":         "5 attempts — $13.50 (−10%)",
+        "btn_buy_10":        "10 attempts — $25.50 (−15%)",
+        "btn_buy_25":        "25 attempts — $56.25 (−25%)",
         "btn_sub_1d":        "📅 1 day — $3.00",
         "btn_sub_3d":        "📅 3 days — $5.00",
         "btn_sub_7d":        "📅 7 days — $10.00",
@@ -1844,9 +1840,14 @@ def xrocket_create_invoice(amount: float, attempts: int):
         data = r.json()
         if data.get("success") and data.get("data"):
             inv = data["data"]
+            # xRocket Pay API v2 возвращает payUrl; v1 — link. Поддерживаем оба.
+            pay_url = inv.get("payUrl") or inv.get("link") or inv.get("pay_url") or inv.get("url") or ""
+            if not pay_url:
+                logging.warning("xRocket: нет pay_url в ответе: %s", inv)
+                return None
             return {
-                "invoice_id": str(inv["id"]),
-                "pay_url":    inv["link"],
+                "invoice_id": str(inv.get("id") or inv.get("invoiceId") or ""),
+                "pay_url":    pay_url,
             }
         logging.warning("xRocket create error: %s", data)
         return None
@@ -1867,8 +1868,10 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
         )
         data = r.json()
         if data.get("success") and data.get("data"):
-            status = data["data"].get("status", "").lower()
-            return "paid" if status in ("paid", "completed") else status
+            inv  = data["data"]
+            # xRocket возвращает status как "PAID", "ACTIVE", "EXPIRED" и т.д.
+            status = (inv.get("status") or inv.get("statusText") or "").lower()
+            return "paid" if status in ("paid", "completed", "success") else status
         return None
     except Exception as e:
         logging.error("xrocket_check_invoice: %s", e)
@@ -2087,6 +2090,50 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     return WAITING_ADMIN_PASSWORD
 
+async def _show_payment_method_screen(query, user_id: int, count: int, total: float, discount: float, lang: str):
+    """Показывает экран выбора метода оплаты с деталями инвойса."""
+    disc_str = f"−{int(discount*100)}%" if discount else ("без скидки" if lang == "ru" else "no discount")
+    if lang == "ru":
+        text = (
+            f"💳 *Выберите способ оплаты*\n\n"
+            f"Инвойс: `0`\n"
+            f"Попыток: *{count}*\n"
+            f"Сумма: *${total:.2f}*\n"
+            f"Скидка: {disc_str}\n\n"
+            f"Нажмите кнопку ниже для оплаты в USD\\.\n"
+            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+        )
+    else:
+        text = (
+            f"💳 *Choose payment method*\n\n"
+            f"Invoice: `0`\n"
+            f"Attempts: *{count}*\n"
+            f"Amount: *${total:.2f}*\n"
+            f"Discount: {disc_str}\n\n"
+            f"Tap a button below to pay in USD\\.\n"
+            f"After payment tap «I paid», attempts will be credited immediately\\."
+        )
+    method_buttons = []
+    if CRYPTO_BOT_TOKEN:
+        method_buttons.append(InlineKeyboardButton("🤖 CryptoBot", callback_data=f"paymethod_cb_{count}"))
+    if XROCKET_TOKEN:
+        method_buttons.append(InlineKeyboardButton("🚀 xRocket",   callback_data=f"paymethod_xr_{count}"))
+    if not method_buttons:
+        await query.answer(
+            "Способы оплаты временно недоступны." if lang == "ru" else "Payment methods unavailable.",
+            show_alert=True,
+        )
+        return
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            method_buttons,
+            [InlineKeyboardButton("◀️ Назад" if lang == "ru" else "◀️ Back", callback_data="buy_attempts")],
+        ]),
+    )
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SERVICE_NO2FA_ENABLED, SERVICE_2FA_ENABLED
     query    = update.callback_query
@@ -2173,15 +2220,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "buy_attempts":
         lang = db_get_lang(user_id) or "ru"
+        if lang == "ru":
+            text = (
+                "🛒 *Покупка попыток*\n\n"
+                f"Цена за 1 попытку: *${PRICE_2FA:.0f}*\n\n"
+                "Скидки на пакеты:\n"
+                "• 5 попыток: *10%*\n"
+                "• 10 попыток: *15%*\n"
+                "• 25 попыток: *25%*\n\n"
+                "_Скидка действует только при выборе кнопки\\.\n"
+                "При своём количестве скидки нет\\._\n\n"
+                "Выберите количество или введите число:"
+            )
+        else:
+            text = (
+                "🛒 *Buy Attempts*\n\n"
+                f"Price per attempt: *${PRICE_2FA:.0f}*\n\n"
+                "Package discounts:\n"
+                "• 5 attempts: *10%*\n"
+                "• 10 attempts: *15%*\n"
+                "• 25 attempts: *25%*\n\n"
+                "_Discount applies only to package buttons\\.\n"
+                "Custom amount has no discount\\._\n\n"
+                "Choose a package or type a number:"
+            )
+        context.user_data["waiting"] = "custom_buy_count"
         await query.edit_message_text(
-            "🎯 Выберите пакет попыток:" if lang == "ru" else "🎯 Choose attempts package:",
+            text,
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_buy_1"),  callback_data="buy_1")],
                 [InlineKeyboardButton(t(user_id, "btn_buy_5"),  callback_data="buy_5")],
                 [InlineKeyboardButton(t(user_id, "btn_buy_10"), callback_data="buy_10")],
-                [InlineKeyboardButton(t(user_id, "btn_buy_15"), callback_data="buy_15")],
                 [InlineKeyboardButton(t(user_id, "btn_buy_25"), callback_data="buy_25")],
-                [InlineKeyboardButton(t(user_id, "btn_back"),   callback_data="buy")],
+                [InlineKeyboardButton(
+                    "✏️ Своё количество" if lang == "ru" else "✏️ Custom amount",
+                    callback_data="buy_custom"
+                )],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
             ]),
         )
         return WAITING_BUY
@@ -2286,44 +2361,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_PAYMENT
 
-    if data.startswith("buy_") and data not in ("buy_attempts", "buy_sub"):
+    if data == "buy_custom":
+        lang = db_get_lang(user_id) or "ru"
+        context.user_data["waiting"] = "custom_buy_count"
+        prompt = (
+            "✏️ Введите количество попыток числом (например: 3):"
+            if lang == "ru" else
+            "✏️ Enter the number of attempts (e.g. 3):"
+        )
+        await query.edit_message_text(
+            prompt,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_attempts")
+            ]]),
+        )
+        return WAITING_BUY
+
+    if data.startswith("buy_") and data not in ("buy_attempts", "buy_sub", "buy_custom"):
         try:
             count = int(data.split("_")[1])
         except (ValueError, IndexError):
             return WAITING_MENU
         discount = DISCOUNTS_2FA.get(count, 0)
         total    = round(count * PRICE_2FA * (1 - discount), 2)
-        # Показываем выбор метода оплаты
-        context.user_data["pending_buy"] = {"count": count, "total": total, "type": "attempts"}
-        method_buttons = []
-        if CRYPTO_BOT_TOKEN:
-            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_crypto"),  callback_data=f"paymethod_cb_{count}"))
-        if XROCKET_TOKEN:
-            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_xrocket"), callback_data=f"paymethod_xr_{count}"))
-        if not method_buttons:
-            await query.answer(t(user_id, "pay_method_unavail"), show_alert=True)
-            return WAITING_BUY
-        await query.edit_message_text(
-            t(user_id, "choose_payment", amount=f"{total:.2f}"),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                method_buttons,
-                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")],
-            ]),
-        )
+        lang     = db_get_lang(user_id) or "ru"
+        await _show_payment_method_screen(query, user_id, count, total, discount, lang)
         return WAITING_PAYMENT
 
-    # ── Выбор метода оплаты (попытки) ──
+    # ── Создание инвойса (попытки) ──
     if data.startswith("paymethod_"):
         parts = data.split("_")  # paymethod_cb_5 or paymethod_xr_5
-        method = parts[1]  # cb or xr
+        pay_method = parts[1]  # cb or xr
         try:
             count = int(parts[2])
         except (ValueError, IndexError):
             return WAITING_MENU
         discount = DISCOUNTS_2FA.get(count, 0)
         total    = round(count * PRICE_2FA * (1 - discount), 2)
-        if method == "cb":
+        lang     = db_get_lang(user_id) or "ru"
+        disc_str = f"−{int(discount*100)}%" if discount else ("без скидки" if lang == "ru" else "no discount")
+
+        if pay_method == "cb":
             try:
                 raw = await loop.run_in_executor(executor, create_invoice, total, count)
             except Exception as e:
@@ -2333,12 +2411,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     t(user_id, "pay_error"),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_attempts")
                     ]]),
                 )
                 return WAITING_BUY
-            inv_key = f"cb_{raw['invoice_id']}"
-            pay_url = raw["pay_url"]
+            inv_key    = f"cb_{raw['invoice_id']}"
+            pay_url    = raw["pay_url"]
+            inv_number = raw["invoice_id"]
+            method_label = "CryptoBot"
         else:
             try:
                 raw = await loop.run_in_executor(executor, xrocket_create_invoice, total, count)
@@ -2349,19 +2429,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     t(user_id, "pay_error"),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy")
+                        InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_attempts")
                     ]]),
                 )
                 return WAITING_BUY
-            inv_key = f"xr_{raw['invoice_id']}"
-            pay_url = raw["pay_url"]
+            inv_key    = f"xr_{raw['invoice_id']}"
+            pay_url    = raw["pay_url"]
+            inv_number = raw["invoice_id"]
+            method_label = "xRocket"
+
         pending_payments[inv_key] = {"user_id": user_id, "attempts": count, "total": total}
+
+        if lang == "ru":
+            text = (
+                f"💳 *Оплата через {method_label}*\n\n"
+                f"Инвойс: `{inv_number}`\n"
+                f"Попыток: *{count}*\n"
+                f"Сумма: *${total:.2f}*\n"
+                f"Скидка: {disc_str}\n\n"
+                f"Нажмите кнопку ниже для оплаты в USD\\.\n"
+                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+            )
+            btn_paid = "✅ Я оплатил"
+        else:
+            text = (
+                f"💳 *Payment via {method_label}*\n\n"
+                f"Invoice: `{inv_number}`\n"
+                f"Attempts: *{count}*\n"
+                f"Amount: *${total:.2f}*\n"
+                f"Discount: {disc_str}\n\n"
+                f"Tap the button below to pay in USD\\.\n"
+                f"After payment tap «I paid», attempts will be credited immediately\\."
+            )
+            btn_paid = "✅ I paid"
+
         await query.edit_message_text(
-            t(user_id, "invoice_created", amount=f"{total:.2f}", attempts=count),
+            text,
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_pay"),       url=pay_url)],
-                [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
-                [InlineKeyboardButton(t(user_id, "btn_back"),      callback_data="buy")],
+                [InlineKeyboardButton("💳 Оплатить" if lang == "ru" else "💳 Pay", url=pay_url)],
+                [InlineKeyboardButton(btn_paid, callback_data=f"check_{inv_key}")],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_attempts")],
             ]),
         )
         return WAITING_PAYMENT
@@ -2663,6 +2771,64 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
     waiting  = context.user_data.get("waiting")
     loop     = asyncio.get_running_loop()
+
+    if waiting == "custom_buy_count":
+        context.user_data["waiting"] = None
+        lang = db_get_lang(user_id) or "ru"
+        try:
+            count = int(text.strip())
+            if count < 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Введите целое число больше 0." if lang == "ru" else "❌ Enter a whole number greater than 0.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Назад" if lang == "ru" else "◀️ Back", callback_data="buy_attempts")
+                ]]),
+            )
+            return WAITING_BUY
+        # Кастомное количество — без скидки
+        total = round(count * PRICE_2FA, 2)
+        disc_str = "без скидки" if lang == "ru" else "no discount"
+        if lang == "ru":
+            text_msg = (
+                f"💳 *Выберите способ оплаты*\n\n"
+                f"Инвойс: `0`\n"
+                f"Попыток: *{count}*\n"
+                f"Сумма: *${total:.2f}*\n"
+                f"Скидка: {disc_str}\n\n"
+                f"Нажмите кнопку ниже для оплаты в USD\\.\n"
+                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу\\."
+            )
+        else:
+            text_msg = (
+                f"💳 *Choose payment method*\n\n"
+                f"Invoice: `0`\n"
+                f"Attempts: *{count}*\n"
+                f"Amount: *${total:.2f}*\n"
+                f"Discount: {disc_str}\n\n"
+                f"Tap a button below to pay in USD\\.\n"
+                f"After payment tap «I paid», attempts will be credited immediately\\."
+            )
+        method_buttons = []
+        if CRYPTO_BOT_TOKEN:
+            method_buttons.append(InlineKeyboardButton("🤖 CryptoBot", callback_data=f"paymethod_cb_{count}"))
+        if XROCKET_TOKEN:
+            method_buttons.append(InlineKeyboardButton("🚀 xRocket",   callback_data=f"paymethod_xr_{count}"))
+        if not method_buttons:
+            await update.message.reply_text(
+                "❌ Способы оплаты недоступны." if lang == "ru" else "❌ Payment methods unavailable."
+            )
+            return WAITING_MENU
+        await update.message.reply_text(
+            text_msg,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                method_buttons,
+                [InlineKeyboardButton("◀️ Назад" if lang == "ru" else "◀️ Back", callback_data="buy_attempts")],
+            ]),
+        )
+        return WAITING_PAYMENT
 
     if waiting == "promo":
         context.user_data["waiting"] = None
@@ -3020,9 +3186,31 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-    # Запускаем 2FA воркер
+    # Запускаем 2FA воркер + параллельный апдейт сообщения каждые 15 сек
     _worker_start = _time.time()
-    result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
+
+    async def _progress_updater():
+        dots = ["⏳", "⌛"]
+        i = 0
+        while True:
+            await asyncio.sleep(15)
+            elapsed_now = round(_time.time() - _worker_start)
+            try:
+                await msg.edit_text(
+                    t(user_id, "processing", name=account_name, method=method_name, attempts=attempts_display)
+                    + f"\n\n{dots[i % 2]} {elapsed_now} сек...",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            i += 1
+
+    _progress_task = asyncio.create_task(_progress_updater())
+    try:
+        result = await loop.run_in_executor(executor, call_worker_2fa, cookie, method)
+    finally:
+        _progress_task.cancel()
+
     elapsed = round(_time.time() - _worker_start)
     logging.info(
         "call_worker_2fa result: elapsed=%ss, result=%s",
@@ -3439,7 +3627,10 @@ def main():
                 CallbackQueryHandler(handle_callback),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
             ],
-            WAITING_BUY:     [CallbackQueryHandler(handle_callback)],
+            WAITING_BUY: [
+                CallbackQueryHandler(handle_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+            ],
             WAITING_PAYMENT: [CallbackQueryHandler(handle_callback)],
             WAITING_PROMO: [
                 CallbackQueryHandler(handle_callback),
