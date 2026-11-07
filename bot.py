@@ -3208,16 +3208,32 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
     def _validate_cookie(c: str):
+        url = "https://users.roblox.com/v1/users/authenticated"
+        # Попытка 1: с прокси (если задан)
         try:
             s = _make_roblox_session(c)
-            resp = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
-            logging.info(
-                "_validate_cookie status=%s body=%s",
-                resp.status_code, resp.text[:300]
-            )
+            resp = s.get(url, timeout=12)
+            logging.info("_validate_cookie [proxy=%s] status=%s body=%s",
+                         bool(get_next_proxy()), resp.status_code, resp.text[:300])
             return resp
         except Exception as exc:
-            logging.warning("_validate_cookie network error: %s", exc)
+            logging.warning("_validate_cookie [proxy] error: %s", exc)
+
+        # Попытка 2: напрямую без прокси (если прокси не сработал)
+        try:
+            import requests as _req
+            s2 = _req.Session()
+            s2.cookies[".ROBLOSECURITY"] = c
+            s2.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept":     "application/json, text/plain, */*",
+            })
+            resp = s2.get(url, timeout=12)
+            logging.info("_validate_cookie [no-proxy] status=%s body=%s",
+                         resp.status_code, resp.text[:300])
+            return resp
+        except Exception as exc2:
+            logging.warning("_validate_cookie [no-proxy] error: %s", exc2)
             return None
 
     r = await loop.run_in_executor(executor, _validate_cookie, cookie)
