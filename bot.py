@@ -3167,9 +3167,20 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def _validate_cookie(c: str):
         s = _make_roblox_session(c)
-        return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+        try:
+            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
+        except Exception as proxy_err:
+            logging.warning("Прокси недоступен (%s), повтор без прокси: %s", type(proxy_err).__name__, proxy_err)
+            # Fallback: прямое подключение без прокси
+            s.proxies.clear()
+            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=15)
 
-    r = await loop.run_in_executor(executor, _validate_cookie, cookie)
+    try:
+        r = await loop.run_in_executor(executor, _validate_cookie, cookie)
+    except Exception as e:
+        logging.error("_validate_cookie failed: %s", e)
+        await msg.edit_text(t(user_id, "invalid_cookie"))
+        return WAITING_MENU
     if r.status_code != 200:
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
