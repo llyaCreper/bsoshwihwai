@@ -49,32 +49,81 @@ _proxy_pool: list[str] = []
 _proxy_lock  = __import__("threading").Lock()
 _proxy_index = 0
 
+def _fetch_proxies_from_url(url: str) -> list[str]:
+    """
+    Загружает список прокси с URL (Telegraph, Pastebin, любой текстовый файл).
+    Каждый прокси на отдельной строке.
+    Telegraph пример: https://telegra.ph/Moi-proksi-11-07
+    """
+    try:
+        import re as _re
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        text = r.text
+
+        # Telegraph возвращает HTML — извлекаем текст из <p> и <code> тегов
+        if "telegra.ph" in url or "<html" in text[:200].lower():
+            # Убираем HTML теги
+            text = _re.sub(r"<br\s*/?>", "\n", text, flags=_re.IGNORECASE)
+            text = _re.sub(r"</p>|</li>|</div>", "\n", text, flags=_re.IGNORECASE)
+            text = _re.sub(r"<[^>]+>", "", text)
+            # Декодируем HTML entities
+            text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+
+        proxies = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and (":" in line or line.startswith("http")):
+                proxies.append(line)
+        logging.info("_fetch_proxies_from_url: загружено %d прокси с %s", len(proxies), url)
+        return proxies
+    except Exception as e:
+        logging.error("_fetch_proxies_from_url ошибка (%s): %s", url, e)
+        return []
+
+
 def _load_proxy_pool() -> list[str]:
-    """Загружает пул прокси из файла или env PROXY_URL / PROXY_LIST."""
+    """
+    Загружает пул прокси из нескольких источников (в порядке приоритета):
+      1. PROXY_SOURCE_URL — ссылка на Telegraph/Pastebin/любой текст с прокси
+      2. PROXY_URL        — один прокси напрямую
+      3. PROXY_LIST       — список через запятую или перенос строки
+      4. proxies.txt      — файл рядом со скриптом
+    """
     proxies: list[str] = []
 
-    # 1. Одиночный прокси из PROXY_URL (например socks5://login:pass@ip:port)
+    # 1. Загрузка с URL (Telegraph, Pastebin и т.д.)
+    source_url = os.environ.get("PROXY_SOURCE_URL", "").strip()
+    if source_url:
+        logging.info("Загружаю прокси с URL: %s", source_url)
+        proxies = _fetch_proxies_from_url(source_url)
+        if proxies:
+            logging.info("Загружено %d прокси с %s", len(proxies), source_url)
+            return proxies
+        logging.warning("С URL не загружено ни одного прокси, пробую другие источники")
+
+    # 2. Одиночный прокси из PROXY_URL
     single = os.environ.get("PROXY_URL", "").strip()
     if single:
         logging.info("Используется единственный прокси из PROXY_URL")
         return [single]
 
-    # 2. Из переменной окружения PROXY_LIST
+    # 3. Список из PROXY_LIST
     env_list = os.environ.get("PROXY_LIST", "").strip()
     if env_list:
-        for line in env_list.replace(";", "\n").replace(",", "\n").splitlines():
+        for line in env_list.replace(";", "\n").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 proxies.append(line)
         if proxies:
+            logging.info("Загружено %d прокси из PROXY_LIST", len(proxies))
             return proxies
 
-    # 2. Из CONFIG_PROXY_FILE или proxies.txt рядом со скриптом
+    # 4. Файл proxies.txt
     candidates = []
     if CONFIG_PROXY_FILE:
         candidates.append(CONFIG_PROXY_FILE)
     candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxies.txt"))
-
     for path in candidates:
         if os.path.exists(path):
             try:
@@ -87,104 +136,83 @@ def _load_proxy_pool() -> list[str]:
                     logging.info("Загружено %d прокси из %s", len(proxies), path)
                     return proxies
             except Exception as e:
-                logging.warning("Ошибка чтения прокси файла %s: %s", path, e)
+                logging.warning("Ошибка чтения %s: %s", path, e)
 
+    if not proxies:
+        logging.warning("Прокси не найдены — запросы к Roblox идут напрямую (может блокироваться)")
     return proxies
 
 
 def _parse_proxy(proxy_str: str) -> dict | None:
     """
     Парсит строку прокси в формат для requests.
-    Поддерживаемые форматы:
-      socks5://host:port:rotation_key;login:password  <- VProxy ротационный (основной)
-      socks5://login:pass@host:port                   <- готовый URL
-      http://login:pass@host:port
-      host:port:login:password                        <- пароль может содержать : и @
-      host:port@login:password
-      login:password@host:port
-      login:password:host:port
-      host:port                                       <- без авторизации
-    Протокол задаётся через env PROXY_PROTOCOL (по умолчанию http).
+    Поддерживает все форматы VProxy и других провайдеров:
+      hostname:port:login:password      ← формат VProxy (рекомендуется)
+      hostname:port@login:password
+      login:password:hostname:port
+      login:password@hostname:port
+      hostname:port
+      socks5://login:pass@hostname:port
+      http://login:pass@hostname:port
+    Протокол берётся из env PROXY_PROTOCOL (по умолчанию http).
     """
-    from urllib.parse import quote as _q
     s = proxy_str.strip()
     if not s:
         return None
 
-    # Определяем протокол из строки или env
-    protocol = "http"
-    rest = s
-    for scheme in ("socks5://", "socks4://", "https://", "http://"):
-        if s.lower().startswith(scheme):
-            protocol = scheme.rstrip(":/")
-            rest = s[len(scheme):]
-            break
-    else:
-        protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
+    # Протокол: из env или http по умолчанию
+    protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
 
-    # ── ФОРМАТ VPROXY: host:port:rotation_key;login:password ──
-    # Признак: ";" есть в строке — разделяет ключ ротации от логина
-    if ";" in rest:
-        before, after = rest.split(";", 1)
-        parts = before.split(":")
-        if len(parts) >= 2 and parts[1].isdigit():
-            host = parts[0]
-            port = parts[1]
-            # rotation_key = ":".join(parts[2:])  — нам не нужен
-            creds = after.split(":", 1)
-            login    = creds[0]
-            password = creds[1] if len(creds) > 1 else ""
-            url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
-            return {"http": url, "https": url}
+    # Уже готовый URL-формат — используем как есть
+    if s.startswith(("http://", "https://", "socks5://", "socks4://")):
+        return {"http": s, "https": s}
 
-    # ── ФОРМАТ С @: host:port@login:password или login:password@host:port ──
-    if "@" in rest:
-        at = rest.index("@")
-        left, right = rest[:at], rest[at+1:]
-        lp, rp = left.split(":"), right.split(":")
-        if len(lp) == 2 and lp[1].isdigit():          # host:port @ login:password
-            host, port = lp
-            login    = rp[0]
-            password = ":".join(rp[1:]) if len(rp) > 1 else ""
-        elif len(rp) >= 2 and rp[-1].isdigit():        # login:password @ host:port
-            host, port = rp[-2], rp[-1]
-            login    = lp[0]
-            password = ":".join(lp[1:]) if len(lp) > 1 else ""
+    parts = s.split(":")
+
+    if len(parts) == 4:
+        a, b, c, d = parts
+
+        # hostname:port:login:password — порт это число во 2й позиции
+        if b.isdigit():
+            host, port, login, password = a, b, c, d
+        # login:password:hostname:port — порт это число в 4й позиции
+        elif d.isdigit():
+            login, password, host, port = a, b, c, d
         else:
-            # Готовый URL вида socks5://user:pass@host:port уже разобран выше
-            # Если дошли сюда — не можем распознать
-            import logging as _l
-            _l.warning("Неизвестный формат прокси (@): %s", s)
+            logging.warning("Неизвестный формат прокси (4 части): %s", s)
             return None
-        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
+
+        url = f"{protocol}://{login}:{password}@{host}:{port}"
         return {"http": url, "https": url}
 
-    # ── БЕЗ @ И БЕЗ ; — разбираем по : ──
-    parts = rest.split(":")
+    # Формат hostname:port@login:password или login:password@hostname:port
+    if len(parts) == 3 and "@" in s:
+        left, right = s.split("@", 1)
+        left_parts  = left.split(":")
+        right_parts = right.split(":")
+        # hostname:port @ login:password
+        if len(left_parts) == 2 and left_parts[1].isdigit():
+            host, port = left_parts
+            login, password = right_parts[0], right_parts[1] if len(right_parts) > 1 else ""
+        # login:password @ hostname:port
+        elif len(right_parts) == 2 and right_parts[1].isdigit():
+            login, password = left_parts[0], left_parts[1] if len(left_parts) > 1 else ""
+            host, port = right_parts
+        else:
+            logging.warning("Неизвестный формат прокси (@): %s", s)
+            return None
+        url = f"{protocol}://{login}:{password}@{host}:{port}"
+        return {"http": url, "https": url}
 
-    # host:port — 2 части
+    # Формат hostname:port (без авторизации)
     if len(parts) == 2 and parts[1].isdigit():
-        return {"http": f"{protocol}://{rest}", "https": f"{protocol}://{rest}"}
-
-    # host:port:login:password  (password может содержать :)
-    if len(parts) >= 4 and parts[1].isdigit():
-        host, port = parts[0], parts[1]
-        login    = parts[2]
-        password = ":".join(parts[3:])
-        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
+        url = f"{protocol}://{s}"
         return {"http": url, "https": url}
 
-    # login:password:host:port
-    if len(parts) >= 4 and parts[-1].isdigit():
-        host, port = parts[-2], parts[-1]
-        login    = parts[0]
-        password = ":".join(parts[1:-2])
-        url = f"{protocol}://{_q(login, safe='')}:{_q(password, safe='')}@{host}:{port}"
-        return {"http": url, "https": url}
-
-    import logging as _l
-    _l.warning("Неизвестный формат прокси: %s", s)
+    logging.warning("Неизвестный формат прокси: %s", s)
     return None
+
+
 def get_next_proxy() -> dict | None:
     """Возвращает следующий прокси из пула (round-robin). None если пул пуст."""
     global _proxy_index
@@ -1176,7 +1204,7 @@ TEXTS = {
         "pay_method_unavail":"❌ Способ оплаты недоступен. Обратитесь в поддержку.",
         "pay_ok":            "*Оплата получена!*\nНачислено *{attempts}* попыток\nВсего: *{total}*",
         "pay_pending":       "Оплата ещё не получена. Попробуй позже.",
-        "pay_error":         "❌ Ошибка создания счёта! Попробуйте другой способ оплаты или обратитесь к администратору.",
+        "pay_error":         "Ошибка создания счёта!",
         "lang_set":          "✅ Язык установлен: Русский",
         "ask_2fa":           "На каком аккаунте получить ссылку?",
         "btn_no_2fa":        "🔓 Без 2FA",
@@ -1264,7 +1292,7 @@ TEXTS = {
         "pay_method_unavail":"❌ Payment method unavailable. Contact support.",
         "pay_ok":            "*Payment received!*\nAdded *{attempts}* attempts\nTotal: *{total}*",
         "pay_pending":       "Payment not received yet. Try later.",
-        "pay_error":         "❌ Invoice creation error! Try another payment method or contact support.",
+        "pay_error":         "Invoice creation error!",
         "lang_set":          "✅ Language set: English",
         "ask_2fa":           "Which account type do you want to verify?",
         "btn_no_2fa":        "🔓 Without 2FA",
@@ -1412,17 +1440,13 @@ def get_url_via_api(cookie: str, method: str) -> str | None:
     """Прямой вызов API для аккаунтов без 2FA."""
     try:
         s = _make_roblox_session(cookie)
-        api_url = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
+        url  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
         body = (
             {"generateLink": True, "ageEstimation": False, "parentVerification": False}
             if method == "id"
             else {"generateLink": True, "ageEstimation": True, "parentVerification": False}
         )
-        r1 = s.post(api_url, json=body, timeout=12)
-        logging.info("[get_url_via_api] r1 status=%s headers=%s body=%s",
-                     r1.status_code,
-                     dict(r1.headers),
-                     r1.text[:500])
+        r1   = s.post(url, json=body, timeout=12)
         csrf = r1.headers.get("x-csrf-token")
         if r1.status_code == 200:
             link = _extract_link(r1)
@@ -1430,25 +1454,12 @@ def get_url_via_api(cookie: str, method: str) -> str | None:
                 return link
         if csrf:
             s.headers["x-csrf-token"] = csrf
-            r2 = s.post(api_url, json=body, timeout=12)
-            logging.info("[get_url_via_api] r2 status=%s body=%s",
-                         r2.status_code, r2.text[:500])
+            r2 = s.post(url, json=body, timeout=12)
             if r2.status_code == 200:
                 return _extract_link(r2)
-            # Детектируем 2FA чтобы не путать с ошибкой сети
-            if r2.status_code == 403:
-                ctype = r2.headers.get("rblx-challenge-type", "")
-                if ctype == "twostepverification":
-                    logging.info("[get_url_via_api] аккаунт требует 2FA (403 twostepverification)")
-                    return "__needs_2fa__"
-        elif r1.status_code == 403:
-            ctype = r1.headers.get("rblx-challenge-type", "")
-            if ctype == "twostepverification":
-                logging.info("[get_url_via_api] аккаунт требует 2FA (403 twostepverification) r1")
-                return "__needs_2fa__"
         return None
     except Exception as e:
-        logging.error("[get_url_via_api] exception: %s", e)
+        logging.error("API error: %s", e)
         return None
 
 
@@ -1858,46 +1869,15 @@ def check_invoice(invoice_id):
 
 # ──────────────────────────── xRocket ────────────────────────────
 
-def _xrocket_extract_invoice(body: dict) -> dict | None:
-    """
-    Универсальный парсер ответа xRocket — покрывает Legacy и Pay API v2.
-    Legacy:  { success: true, data: { id, link, ... } }  — поле 'link'
-    Pay API v2: { success: true, data: { id, link, links: { web_link } } }
-    Или без обёртки: { id, link, ... }
-    """
-    # Пробуем развернуть обёртку { success, data }
-    if isinstance(body.get("data"), dict):
-        inv = body["data"]
-    else:
-        inv = body  # ответ без обёртки
-
-    pay_url = (
-        inv.get("link")
-        or inv.get("payUrl")
-        or inv.get("url")
-        or (inv.get("links") or {}).get("web_link")
-        or (inv.get("links") or {}).get("webLink")
-        or ""
-    )
-    inv_id = str(inv.get("id") or inv.get("invoiceId") or "")
-    if pay_url and inv_id:
-        return {"invoice_id": inv_id, "pay_url": pay_url}
-    return None
-
-
 def xrocket_create_invoice(amount: float, attempts: int):
     """
-    Создаёт инвойс xRocket.
-    Пробует оба API:
-      1) Pay API v2  — pay.api.xrocket.exchange  — Authorization: Bearer TOKEN
-      2) Legacy API  — pay.xrocket.tg            — Rocket-Pay-Key: TOKEN
-    Логирует ПОЛНЫЙ ответ при ошибке чтобы было видно что не так.
+    Создаёт инвойс xRocket Pay API v2 (новый API).
+    Endpoint: POST https://pay.api.xrocket.exchange/api/v1/invoices
+    Auth: Authorization: Bearer TOKEN
+    Response: { id, links: { web_link, ... }, status, ... }
     """
     if not XROCKET_TOKEN:
-        logging.warning("xRocket: токен не задан (XROCKET_TOKEN пуст)")
         return None
-
-    # ── 1. Pay API v2 (новый) ──
     try:
         r = requests.post(
             "https://pay.api.xrocket.exchange/api/v1/invoices",
@@ -1907,73 +1887,41 @@ def xrocket_create_invoice(amount: float, attempts: int):
                 "Accept":        "application/json",
             },
             json={
-                "amount":      round(amount, 2),
+                "amount":      str(round(amount, 2)),
                 "currency":    "USDT",
                 "description": f"Roblox Bot: {attempts} попыток 2FA",
                 "numPayments": 1,
             },
             timeout=15,
         )
-        logging.info("[xRocket v2] status=%s body=%s", r.status_code, r.text[:500])
+        logging.info("xRocket create invoice status=%s body=%s", r.status_code, r.text[:300])
         if r.status_code in (200, 201):
-            result = _xrocket_extract_invoice(r.json())
-            if result:
-                logging.info("[xRocket v2] инвойс создан: %s", result)
-                return result
-            logging.warning("[xRocket v2] ответ 2xx но нет ссылки/id: %s", r.text[:500])
-        else:
-            logging.warning("[xRocket v2] ошибка %s: %s", r.status_code, r.text[:500])
+            inv = r.json()
+            # Новый API возвращает объект напрямую (не обёрнут в data/success)
+            # links.web_link — ссылка для оплаты
+            links    = inv.get("links") or {}
+            pay_url  = (links.get("web_link") or links.get("webLink") or
+                        inv.get("payUrl") or inv.get("link") or inv.get("url") or "")
+            inv_id   = str(inv.get("id") or inv.get("invoiceId") or "")
+            if not pay_url or not inv_id:
+                logging.warning("xRocket: нет pay_url или id в ответе: %s", inv)
+                return None
+            return {"invoice_id": inv_id, "pay_url": pay_url}
+        logging.warning("xRocket create error %s: %s", r.status_code, r.text[:300])
+        return None
     except Exception as e:
-        logging.error("[xRocket v2] exception: %s", e)
-
-    # ── 2. Legacy API (старый, pay.xrocket.tg) ──
-    try:
-        r = requests.post(
-            "https://pay.xrocket.tg/tg-invoices",
-            headers={
-                "Rocket-Pay-Key": XROCKET_TOKEN,
-                "Content-Type":   "application/json",
-                "Accept":         "application/json",
-            },
-            json={
-                "amount":      round(amount, 2),
-                "currency":    "USDT",
-                "description": f"Roblox Bot: {attempts} попыток 2FA",
-                "numPayments": 1,
-            },
-            timeout=15,
-        )
-        logging.info("[xRocket legacy] status=%s body=%s", r.status_code, r.text[:500])
-        if r.status_code in (200, 201):
-            result = _xrocket_extract_invoice(r.json())
-            if result:
-                logging.info("[xRocket legacy] инвойс создан: %s", result)
-                return result
-            logging.warning("[xRocket legacy] ответ 2xx но нет ссылки/id: %s", r.text[:500])
-        else:
-            logging.warning("[xRocket legacy] ошибка %s: %s", r.status_code, r.text[:500])
-    except Exception as e:
-        logging.error("[xRocket legacy] exception: %s", e)
-
-    return None
-
-
-def _xrocket_parse_status(body: dict) -> str | None:
-    """Универсальный парсер статуса — Legacy и Pay API v2."""
-    inv = body.get("data") if isinstance(body.get("data"), dict) else body
-    status = (inv.get("status") or "").lower()
-    return "paid" if status in ("paid", "completed", "success") else (status or None)
+        logging.error("xrocket_create_invoice: %s", e)
+        return None
 
 
 def xrocket_check_invoice(invoice_id: str) -> str | None:
     """
-    Проверяет статус инвойса.
-    Пробует Pay API v2, затем Legacy API.
+    Проверяет статус инвойса xRocket Pay API v2.
+    GET https://pay.api.xrocket.exchange/api/v1/invoices/{id}
+    Response: { status: "active" | "paid" | "expired" | ... }
     """
     if not XROCKET_TOKEN:
         return None
-
-    # ── 1. Pay API v2 ──
     try:
         r = requests.get(
             f"https://pay.api.xrocket.exchange/api/v1/invoices/{invoice_id}",
@@ -1983,33 +1931,15 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
             },
             timeout=15,
         )
-        logging.info("[xRocket v2 check] status=%s body=%s", r.status_code, r.text[:300])
         if r.status_code == 200:
-            return _xrocket_parse_status(r.json())
-        # 404 — инвойс не найден на этом API, пробуем Legacy
-        if r.status_code != 404:
-            logging.warning("[xRocket v2 check] ошибка %s: %s", r.status_code, r.text[:300])
+            inv    = r.json()
+            status = (inv.get("status") or "").lower()
+            return "paid" if status in ("paid", "completed", "success") else status
+        logging.warning("xRocket check error %s: %s", r.status_code, r.text[:200])
+        return None
     except Exception as e:
-        logging.error("[xRocket v2 check] exception: %s", e)
-
-    # ── 2. Legacy API ──
-    try:
-        r = requests.get(
-            f"https://pay.xrocket.tg/tg-invoices/{invoice_id}",
-            headers={
-                "Rocket-Pay-Key": XROCKET_TOKEN,
-                "Accept":         "application/json",
-            },
-            timeout=15,
-        )
-        logging.info("[xRocket legacy check] status=%s body=%s", r.status_code, r.text[:300])
-        if r.status_code == 200:
-            return _xrocket_parse_status(r.json())
-        logging.warning("[xRocket legacy check] ошибка %s: %s", r.status_code, r.text[:300])
-    except Exception as e:
-        logging.error("[xRocket legacy check] exception: %s", e)
-
-    return None
+        logging.error("xrocket_check_invoice: %s", e)
+        return None
 
 
 async def send_log(context, user_id, username, method, elapsed_sec, has_2fa=False):
@@ -2230,20 +2160,22 @@ async def _show_payment_method_screen(query, user_id: int, count: int, total: fl
     if lang == "ru":
         text = (
             f"💳 *Выберите способ оплаты*\n\n"
+            f"Инвойс: `0`\n"
             f"Попыток: *{count}*\n"
             f"Сумма: *${total:.2f}*\n"
             f"Скидка: {disc_str}\n\n"
-            f"Выберите кнопку ниже для выбора способа оплаты.\n"
-            f"Инвойс будет создан автоматически после выбора метода."
+            f"Нажмите кнопку ниже для оплаты в USD.\n"
+            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
         )
     else:
         text = (
             f"💳 *Choose payment method*\n\n"
+            f"Invoice: `0`\n"
             f"Attempts: *{count}*\n"
             f"Amount: *${total:.2f}*\n"
             f"Discount: {disc_str}\n\n"
-            f"Select a payment method below.\n"
-            f"An invoice will be created automatically after you choose."
+            f"Tap a button below to pay in USD.\n"
+            f"After payment tap «I paid», attempts will be credited immediately."
         )
     method_buttons = []
     if CRYPTO_BOT_TOKEN:
@@ -2483,30 +2415,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "sub", "user_id": user_id,
             "days": days, "price": price, "desc": desc,
         }
-        inv_number = raw["invoice_id"]
-        lang = db_get_lang(user_id) or "ru"
-        method_label = "CryptoBot" if method == "cb" else "xRocket"
-        if lang == "ru":
-            sub_text = (
-                f"💳 *Оплата через {method_label}*\n\n"
-                f"Инвойс: `{inv_number}`\n"
-                f"Подписка: *{desc}*\n"
-                f"Сумма: *${price}*\n\n"
-                f"Нажмите кнопку ниже для оплаты.\n"
-                f"После оплаты нажмите «Я оплатил»."
-            )
-        else:
-            sub_text = (
-                f"💳 *Payment via {method_label}*\n\n"
-                f"Invoice: `{inv_number}`\n"
-                f"Subscription: *{desc}*\n"
-                f"Amount: *${price}*\n\n"
-                f"Tap the button below to pay.\n"
-                f"After payment tap «I paid»."
-            )
         await query.edit_message_text(
-            sub_text,
-            parse_mode="Markdown",
+            f"Счёт на подписку: {desc}\nСумма: ${price}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(t(user_id, "btn_pay"),       url=pay_url)],
                 [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
@@ -2947,20 +2857,22 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lang == "ru":
             text_msg = (
                 f"💳 *Выберите способ оплаты*\n\n"
+                f"Инвойс: `0`\n"
                 f"Попыток: *{count}*\n"
                 f"Сумма: *${total:.2f}*\n"
                 f"Скидка: {disc_str}\n\n"
-                f"Выберите кнопку ниже для выбора способа оплаты.\n"
-                f"Инвойс будет создан автоматически после выбора метода."
+                f"Нажмите кнопку ниже для оплаты в USD.\n"
+                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
             )
         else:
             text_msg = (
                 f"💳 *Choose payment method*\n\n"
+                f"Invoice: `0`\n"
                 f"Attempts: *{count}*\n"
                 f"Amount: *${total:.2f}*\n"
                 f"Discount: {disc_str}\n\n"
-                f"Select a payment method below.\n"
-                f"An invoice will be created automatically after you choose."
+                f"Tap a button below to pay in USD.\n"
+                f"After payment tap «I paid», attempts will be credited immediately."
             )
         method_buttons = []
         if CRYPTO_BOT_TOKEN:
@@ -3244,92 +3156,11 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
     def _validate_cookie(c: str):
-        url = "https://users.roblox.com/v1/users/authenticated"
-        # Попытка 1: с прокси (если задан)
-        try:
-            s = _make_roblox_session(c)
-            resp = s.get(url, timeout=12)
-            logging.info("_validate_cookie [proxy=%s] status=%s body=%s",
-                         bool(get_next_proxy()), resp.status_code, resp.text[:300])
-            return resp
-        except Exception as exc:
-            logging.warning("_validate_cookie [proxy] error: %s", exc)
-
-        # Попытка 2: напрямую без прокси (если прокси не сработал)
-        try:
-            import requests as _req
-            s2 = _req.Session()
-            s2.cookies[".ROBLOSECURITY"] = c
-            s2.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept":     "application/json, text/plain, */*",
-            })
-            resp = s2.get(url, timeout=12)
-            logging.info("_validate_cookie [no-proxy] status=%s body=%s",
-                         resp.status_code, resp.text[:300])
-            return resp
-        except Exception as exc2:
-            logging.warning("_validate_cookie [no-proxy] error: %s", exc2)
-            return None
+        s = _make_roblox_session(c)
+        return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
 
     r = await loop.run_in_executor(executor, _validate_cookie, cookie)
-    lang = db_get_lang(user_id) or "ru"
-
-    if r is None:
-        # Сетевая ошибка — не проблема куки
-        err_text = (
-            "⚠️ Не удалось подключиться к Roblox. Попробуйте позже."
-            if lang == "ru" else
-            "⚠️ Failed to connect to Roblox. Please try again later."
-        )
-        await msg.edit_text(err_text)
-        return WAITING_MENU
-
-    if r.status_code == 403:
-        # 403 может означать: IP датацентра заблокирован Roblox, или куки истёк
-        body_text = r.text.lower()
-        if "token validation failed" in body_text or "x-csrf-token" in body_text:
-            # CSRF проблема — пробуем ещё раз с токеном
-            def _validate_cookie_csrf(c: str):
-                try:
-                    s = _make_roblox_session(c)
-                    r1 = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
-                    csrf = r1.headers.get("x-csrf-token")
-                    if csrf:
-                        s.headers["x-csrf-token"] = csrf
-                        r2 = s.get("https://users.roblox.com/v1/users/authenticated", timeout=12)
-                        logging.info("_validate_cookie_csrf retry status=%s", r2.status_code)
-                        return r2
-                    return r1
-                except Exception as exc:
-                    logging.warning("_validate_cookie_csrf error: %s", exc)
-                    return None
-            r = await loop.run_in_executor(executor, _validate_cookie_csrf, cookie)
-            if r is None or r.status_code != 200:
-                await msg.edit_text(t(user_id, "invalid_cookie"))
-                return WAITING_MENU
-        elif "challenge" in body_text or "captcha" in body_text or r.status_code == 403:
-            # IP датацентра заблокирован — куки может быть верным
-            logging.warning("Roblox 403 — возможно IP датацентра заблокирован: %s", r.text[:200])
-            err_text = (
-                "⚠️ Roblox блокирует запросы с сервера. Настройте прокси (PROXY_URL) или попробуйте позже."
-                if lang == "ru" else
-                "⚠️ Roblox is blocking server requests. Configure a proxy (PROXY_URL) or try later."
-            )
-            await msg.edit_text(err_text)
-            return WAITING_MENU
-
-    if r.status_code == 429:
-        err_text = (
-            "⚠️ Roblox вернул лимит запросов (429). Подождите минуту и попробуйте снова."
-            if lang == "ru" else
-            "⚠️ Roblox rate limit (429). Wait a minute and try again."
-        )
-        await msg.edit_text(err_text)
-        return WAITING_MENU
-
     if r.status_code != 200:
-        logging.warning("_validate_cookie unexpected status %s: %s", r.status_code, r.text[:200])
         await msg.edit_text(t(user_id, "invalid_cookie"))
         return WAITING_MENU
 
@@ -3350,23 +3181,6 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем напрямую: если на аккаунте нет 2FA, Roblox выдаст ссылку за 1-2 сек бесплатно!
     fast_link = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
     elapsed = round(_time.time() - _start_time)
-
-    # None = сетевая ошибка / API недоступен — НЕ значит что есть 2FA
-    # "__needs_2fa__" = Roblox явно сказал что нужна 2FA
-    if fast_link is None:
-        # Не можем определить наличие 2FA — сообщаем об ошибке сети
-        lang = db_get_lang(user_id) or "ru"
-        err_text = (
-            "⚠️ Не удалось обратиться к Roblox API. Проверьте прокси или попробуйте позже."
-            if lang == "ru" else
-            "⚠️ Failed to reach Roblox API. Check proxy settings or try again later."
-        )
-        await msg.edit_text(err_text)
-        return WAITING_MENU
-
-    # Явный сигнал от Roblox что нужна 2FA
-    if fast_link == "__needs_2fa__":
-        fast_link = None  # дальше обрабатывается как "нет быстрой ссылки"
 
     if fast_link and _is_persona_link(fast_link):
         logging.info("Ссылка получена быстро (на аккаунте нет 2FA) за %s сек — бесплатно", elapsed)
