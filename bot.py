@@ -18,6 +18,7 @@ import re
 import logging
 import requests
 import asyncio
+from urllib.parse import quote as _url_quote
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -163,9 +164,18 @@ def _parse_proxy(proxy_str: str) -> dict | None:
     # Протокол: из env или http по умолчанию
     protocol = os.environ.get("PROXY_PROTOCOL", "http").lower().rstrip("://")
 
-    # Уже готовый URL-формат — используем как есть
-    if s.startswith(("http://", "https://", "socks5://", "socks4://")):
-        return {"http": s, "https": s}
+    # Формат http://hostname:port:login:password (протокол + 4 части через двоеточие)
+    for scheme in ("http://", "https://", "socks5://", "socks4://"):
+        if s.startswith(scheme):
+            rest = s[len(scheme):]
+            rest_parts = rest.split(":")
+            # http://host:port:login:password → конвертируем в стандартный URL
+            if len(rest_parts) == 4 and rest_parts[1].isdigit():
+                host, port, login, password = rest_parts
+                url = f"{scheme[:-3]}://{_url_quote(login, safe='')}:{_url_quote(password, safe='')}@{host}:{port}"
+                return {"http": url, "https": url}
+            # Уже готовый URL-формат (http://login:pass@host:port) — используем как есть
+            return {"http": s, "https": s}
 
     parts = s.split(":")
 
@@ -182,7 +192,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
             logging.warning("Неизвестный формат прокси (4 части): %s", s)
             return None
 
-        url = f"{protocol}://{login}:{password}@{host}:{port}"
+        url = f"{protocol}://{_url_quote(login, safe='')}:{_url_quote(password, safe='')}@{host}:{port}"
         return {"http": url, "https": url}
 
     # Формат hostname:port@login:password или login:password@hostname:port
@@ -201,7 +211,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
         else:
             logging.warning("Неизвестный формат прокси (@): %s", s)
             return None
-        url = f"{protocol}://{login}:{password}@{host}:{port}"
+        url = f"{protocol}://{_url_quote(login, safe='')}:{_url_quote(password, safe='')}@{host}:{port}"
         return {"http": url, "https": url}
 
     # Формат hostname:port (без авторизации)
