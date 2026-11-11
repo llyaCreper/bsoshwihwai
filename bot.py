@@ -235,26 +235,63 @@ def get_next_proxy() -> dict | None:
 
 
 class _ProxyOnlySession(requests.Session):
-    """Все запросы проходят через выбранный прокси."""
-
-    def __init__(self, proxy):
+    def __init__(self, proxy, allow_direct_fallback=False):
         super().__init__()
 
-        if not proxy or not proxy.get("http") or not proxy.get("https"):
+        self._allow_direct_fallback = allow_direct_fallback
+        valid = bool(
+            proxy and proxy.get("http") and proxy.get("https")
+        )
+
+        if not valid and not allow_direct_fallback:
             raise RuntimeError(
                 "Прокси не настроен или имеет неверный формат"
             )
 
-        self._required_proxy = dict(proxy)
-        self.proxies.update(proxy)
+        self._required_proxy = dict(proxy) if valid else None
 
     def request(self, method, url, **kwargs):
-        kwargs["proxies"] = dict(self._required_proxy)
+        if self._required_proxy:
+            kwargs["proxies"] = dict(self._required_proxy)
+
+            try:
+                return super().request(method, url, **kwargs)
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as e:
+                if not self._allow_direct_fallback:
+                    raise
+
+                logging.warning(
+                    "Без 2FA: сбой прокси (%s), повтор напрямую",
+                    type(e).__name__,
+                )
+
+        elif not self._allow_direct_fallback:
+            raise RuntimeError("Прямое подключение запрещено")
+        else:
+            logging.warning(
+                "Без 2FA: прокси не настроен, подключение напрямую"
+            )
+
+        # Не используем также прокси из переменных окружения.
+        kwargs["proxies"] = {
+            "http": None,
+            "https": None,
+            "all": None,
+        }
         return super().request(method, url, **kwargs)
 
-def _make_roblox_session(cookie: str) -> "requests.Session":
-    """Создаёт requests.Session с куки Roblox и, если есть пул, с прокси."""
-    s = _ProxyOnlySession(get_next_proxy())
+def _make_roblox_session(
+    cookie: str,
+    allow_direct_fallback: bool = False,
+) -> "requests.Session":
+    """Создаёт Roblox-сессию с прокси и опциональным direct fallback."""
+    s = _ProxyOnlySession(
+        get_next_proxy(),
+        allow_direct_fallback=allow_direct_fallback,
+    )
     s.cookies[".ROBLOSECURITY"] = cookie
     s.headers.update({
         "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1473,10 +1510,17 @@ def t(user_id, key, lang_override=None, **kwargs) -> str:
 
 # ──────────────────────────── HELPERS ────────────────────────────
 
-def get_url_via_api(cookie: str, method: str) -> dict:
+def get_url_via_api(
+    cookie: str,
+    method: str,
+    allow_direct_fallback: bool = False,
+) -> dict:
     """Отличает запрос 2FA от сетевых и других ошибок."""
     try:
-        s = _make_roblox_session(cookie)
+        s = _make_roblox_session(
+            cookie,
+            allow_direct_fallback=allow_direct_fallback,
+        )
 
         url = (
             "https://apis.roblox.com/age-verification-service/"
@@ -2071,6 +2115,9 @@ def _lang_kb():
 # ──────────────────────────── HANDLERS ────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("waiting", None)
+    context.user_data.pop("target_uid", None)
+
     user_id  = update.effective_user.id
     tg       = update.effective_user
     username = tg.username or tg.first_name or "Аноним"
@@ -2263,6 +2310,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg       = update.effective_user
     username = tg.username or tg.first_name or "Аноним"
     data     = query.data
+
+    context.user_data.pop("waiting", None)
+    context.user_data.pop("target_uid", None)
+
     loop     = asyncio.get_running_loop()
 
     # Всегда отвечаем на callback сразу — иначе Telegram покажет бесконечную загрузку
@@ -2903,7 +2954,6 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop     = asyncio.get_running_loop()
 
     if waiting == "custom_buy_count":
-        context.user_data["waiting"] = None
         lang = db_get_lang(user_id) or "ru"
         try:
             count = int(text.strip())
@@ -2917,8 +2967,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]]),
             )
             return WAITING_BUY
+        context.user_data.pop("waiting", None)
+
         # Кастомное количество — без скидки
-        total = round(count * PRICE_2FA, 2)
+        total = _attempts_price(count)
         disc_str = "без скидки" if lang == "ru" else "no discount"
         if lang == "ru":
             text_msg = (
@@ -3222,7 +3274,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(chat_id=chat_id, text=t(user_id, "checking_cookie"))
 
     def _validate_cookie(c: str):
-        s = _make_roblox_session(c)
+        s = _make_roblox_session(
+            c,
+            allow_direct_fallback=not has_2fa,
+        )
         return s.get(
             "https://users.roblox.com/v1/users/authenticated",
             timeout=15,
@@ -3260,7 +3315,11 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── ЭТАП 1: Быстрая проверка без 2FA (быстро ссылка = нет 2FA) ──
     # Проверяем напрямую: если на аккаунте нет 2FA, Roblox выдаст ссылку за 1-2 сек бесплатно!
     fast_result = await loop.run_in_executor(
-        executor, get_url_via_api, cookie, method
+        executor,
+        get_url_via_api,
+        cookie,
+        method,
+        not has_2fa,
     )
     fast_link = fast_result.get("link")
     elapsed = round(_time.time() - _start_time)
