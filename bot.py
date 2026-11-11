@@ -3803,6 +3803,50 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ──────────────────────────── MAIN ────────────────────────────
 
+async def send_log(
+    context,
+    user_id,
+    username,
+    method,
+    elapsed_sec,
+    has_2fa=False,
+):
+    try:
+        cost = (
+            f"${PRICE_2FA:.2f}"
+            if has_2fa
+            else "БЕСПЛАТНО"
+        )
+        service = "Camera" if method == "camera" else "ID"
+
+        text = (
+            "✅ Ссылка получена\n"
+            f"👤 Пользователь: {username}\n"
+            f"🆔 Telegram ID: {user_id}\n"
+            f"⚙️ Услуга: {service}\n"
+            f"⏱ Время: {round(elapsed_sec)} сек\n"
+            f"💳 Сумма: {cost}"
+        )
+
+        sent = await context.bot.send_message(
+            chat_id=_log_chat_id(),
+            text=text,
+            parse_mode=None,
+        )
+
+        logging.info(
+            "send_log: отправлено, message_id=%s",
+            sent.message_id,
+        )
+        return True
+
+    except Exception:
+        logging.exception(
+            "send_log: ошибка отправки в канал"
+        )
+        return False
+
+
 def _log_chat_id():
     value = str(LOG_CHANNEL_ID or "").strip()
 
