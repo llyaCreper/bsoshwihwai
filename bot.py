@@ -234,9 +234,27 @@ def get_next_proxy() -> dict | None:
     return _parse_proxy(proxy_str)
 
 
+class _ProxyOnlySession(requests.Session):
+    """Все запросы проходят через выбранный прокси."""
+
+    def __init__(self, proxy):
+        super().__init__()
+
+        if not proxy or not proxy.get("http") or not proxy.get("https"):
+            raise RuntimeError(
+                "Прокси не настроен или имеет неверный формат"
+            )
+
+        self._required_proxy = dict(proxy)
+        self.proxies.update(proxy)
+
+    def request(self, method, url, **kwargs):
+        kwargs["proxies"] = dict(self._required_proxy)
+        return super().request(method, url, **kwargs)
+
 def _make_roblox_session(cookie: str) -> "requests.Session":
     """Создаёт requests.Session с куки Roblox и, если есть пул, с прокси."""
-    s = requests.Session()
+    s = _ProxyOnlySession(get_next_proxy())
     s.cookies[".ROBLOSECURITY"] = cookie
     s.headers.update({
         "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -245,9 +263,6 @@ def _make_roblox_session(cookie: str) -> "requests.Session":
         "Origin":       "https://www.roblox.com",
         "Referer":      "https://www.roblox.com/my/account#!/info",
     })
-    proxy = get_next_proxy()
-    if proxy:
-        s.proxies.update(proxy)
     return s
 
 # ══════════════════════════════════════════════════════════════════════
@@ -595,8 +610,20 @@ WAITING_ADMIN_BROADCAST             = 14
 WAITING_2FA_CODE                    = 15
 WAITING_ADMIN_CHANGE_PASSWORD       = 16
 
-PRICE_2FA     = 3.00
+PRICE_2FA = 1.25
 DISCOUNTS_2FA = {5: 0.10, 10: 0.15, 25: 0.25}
+
+def _attempts_price(count: int, discount: float = 0) -> float:
+    from decimal import Decimal, ROUND_HALF_UP
+
+    total = (
+        Decimal(count)
+        * Decimal(str(PRICE_2FA))
+        * (Decimal("1") - Decimal(str(discount)))
+    )
+    return float(
+        total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
 SUBSCRIPTIONS = {1: 3.00, 3: 5.00, 7: 10.00, 30: 25.00, 0: 50.00}
 
 # ──────────────────────────── DATABASE (connection pool) ────────────────────────────
@@ -1153,9 +1180,9 @@ TEXTS = {
         "btn_admin":         "Админ панель",
         "btn_back":          "Назад",
         "btn_cancel":        "Отмена",
-        "btn_buy_5":         "5 попыток — $13.50 (−10%)",
-        "btn_buy_10":        "10 попыток — $25.50 (−15%)",
-        "btn_buy_25":        "25 попыток — $56.25 (−25%)",
+        "btn_buy_5":         "5 попыток — $5.63 (−10%)",
+        "btn_buy_10":        "10 попыток — $10.63 (−15%)",
+        "btn_buy_25":        "25 попыток — $23.44 (−25%)",
         "btn_sub_1d":        "📅 1 день — $3.00",
         "btn_sub_3d":        "📅 3 дня — $5.00",
         "btn_sub_7d":        "📅 7 дней — $10.00",
@@ -1186,7 +1213,7 @@ TEXTS = {
         "top_title":         "*Топ пользователей*\n",
         "top_empty":         "Пока никто не совершил покупок.",
         "buy_title":         "*Магазин*",
-        "buy_price":         "🔓 Без 2FA — *БЕСПЛАТНО*\n🔐 С 2FA — *$1.00* за попытку",
+        "buy_price":         "🔓 Без 2FA — *БЕСПЛАТНО*\n🔐 С 2FA — *$1.25* за попытку",
         "promo_title":       "*Активация промокода*",
         "promo_enter":       "Введите промокод:",
         "promo_ok":          "Промокод активирован! +*{attempts}* попыток\nВсего: *{total}*",
@@ -1241,9 +1268,9 @@ TEXTS = {
         "btn_admin":         "Admin panel",
         "btn_back":          "Back",
         "btn_cancel":        "Cancel",
-        "btn_buy_5":         "5 attempts — $13.50 (−10%)",
-        "btn_buy_10":        "10 attempts — $25.50 (−15%)",
-        "btn_buy_25":        "25 attempts — $56.25 (−25%)",
+        "btn_buy_5":         "5 attempts — $5.63 (−10%)",
+        "btn_buy_10":        "10 attempts — $10.63 (−15%)",
+        "btn_buy_25":        "25 attempts — $23.44 (−25%)",
         "btn_sub_1d":        "📅 1 day — $3.00",
         "btn_sub_3d":        "📅 3 days — $5.00",
         "btn_sub_7d":        "📅 7 days — $10.00",
@@ -1274,7 +1301,7 @@ TEXTS = {
         "top_title":         "*Top users*\n",
         "top_empty":         "No purchases yet.",
         "buy_title":         "*Shop*",
-        "buy_price":         "🔓 Without 2FA — *FREE*\n🔐 With 2FA — *$1.00* per attempt",
+        "buy_price":         "🔓 Without 2FA — *FREE*\n🔐 With 2FA — *$1.25* per attempt",
         "promo_title":       "*Promo code activation*",
         "promo_enter":       "Enter promo code:",
         "promo_ok":          "Promo activated! +*{attempts}* attempts\nTotal: *{total}*",
@@ -1446,31 +1473,60 @@ def t(user_id, key, lang_override=None, **kwargs) -> str:
 
 # ──────────────────────────── HELPERS ────────────────────────────
 
-def get_url_via_api(cookie: str, method: str) -> str | None:
-    """Прямой вызов API для аккаунтов без 2FA."""
+def get_url_via_api(cookie: str, method: str) -> dict:
+    """Отличает запрос 2FA от сетевых и других ошибок."""
     try:
         s = _make_roblox_session(cookie)
-        url  = "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
-        body = (
-            {"generateLink": True, "ageEstimation": False, "parentVerification": False}
-            if method == "id"
-            else {"generateLink": True, "ageEstimation": True, "parentVerification": False}
+
+        url = (
+            "https://apis.roblox.com/age-verification-service/"
+            "v1/persona-id-verification/start-verification"
         )
-        r1   = s.post(url, json=body, timeout=12)
-        csrf = r1.headers.get("x-csrf-token")
-        if r1.status_code == 200:
-            link = _extract_link(r1)
-            if link:
-                return link
-        if csrf:
+        body = {
+            "generateLink": True,
+            "ageEstimation": method != "id",
+            "parentVerification": False,
+        }
+
+        r = s.post(url, json=body, timeout=12)
+
+        challenge = r.headers.get("rblx-challenge-type", "")
+        csrf = r.headers.get("x-csrf-token")
+
+        if r.status_code == 403 and csrf and not challenge:
             s.headers["x-csrf-token"] = csrf
-            r2 = s.post(url, json=body, timeout=12)
-            if r2.status_code == 200:
-                return _extract_link(r2)
-        return None
+            r = s.post(url, json=body, timeout=12)
+
+        if r.status_code == 200:
+            link = _extract_link(r)
+
+            if link:
+                return {"status": "ok", "link": link}
+
+            return {"status": "no_link"}
+
+        if (
+            r.status_code == 403
+            and r.headers.get("rblx-challenge-type")
+            == "twostepverification"
+        ):
+            return {"status": "2fa_required"}
+
+        logging.warning(
+            "Roblox verification failed: HTTP %s",
+            r.status_code,
+        )
+        return {
+            "status": "http_error",
+            "http_status": r.status_code,
+        }
+
     except Exception as e:
-        logging.error("API error: %s", e)
-        return None
+        logging.warning(
+            "Roblox verification request failed: %s",
+            type(e).__name__,
+        )
+        return {"status": "network_error"}
 
 
 def get_url_via_api_2fa(cookie: str, method: str) -> "str | dict | None":
@@ -2289,7 +2345,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lang == "ru":
             text = (
                 "🛒 *Покупка попыток*\n\n"
-                f"Цена за 1 попытку: *${PRICE_2FA:.0f}*\n\n"
+                f"Цена за 1 попытку: *${PRICE_2FA:.2f}*\n\n"
                 "Скидки на пакеты:\n"
                 "• 5 попыток: *10%*\n"
                 "• 10 попыток: *15%*\n"
@@ -2301,7 +2357,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = (
                 "🛒 *Buy Attempts*\n\n"
-                f"Price per attempt: *${PRICE_2FA:.0f}*\n\n"
+                f"Price per attempt: *${PRICE_2FA:.2f}*\n\n"
                 "Package discounts:\n"
                 "• 5 attempts: *10%*\n"
                 "• 10 attempts: *15%*\n"
@@ -2449,7 +2505,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             return WAITING_MENU
         discount = DISCOUNTS_2FA.get(count, 0)
-        total    = round(count * PRICE_2FA * (1 - discount), 2)
+        total    = _attempts_price(count, discount)
         lang     = db_get_lang(user_id) or "ru"
         await _show_payment_method_screen(query, user_id, count, total, discount, lang)
         return WAITING_PAYMENT
@@ -2463,7 +2519,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             return WAITING_MENU
         discount = DISCOUNTS_2FA.get(count, 0)
-        total    = round(count * PRICE_2FA * (1 - discount), 2)
+        total    = _attempts_price(count, discount)
         lang     = db_get_lang(user_id) or "ru"
         disc_str = f"−{int(discount*100)}%" if discount else ("без скидки" if lang == "ru" else "no discount")
 
@@ -3167,19 +3223,22 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def _validate_cookie(c: str):
         s = _make_roblox_session(c)
-        try:
-            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=10)
-        except Exception as proxy_err:
-            logging.warning("Прокси недоступен (%s), повтор без прокси: %s", type(proxy_err).__name__, proxy_err)
-            # Fallback: прямое подключение без прокси
-            s.proxies.clear()
-            return s.get("https://users.roblox.com/v1/users/authenticated", timeout=15)
+        return s.get(
+            "https://users.roblox.com/v1/users/authenticated",
+            timeout=15,
+        )
 
     try:
         r = await loop.run_in_executor(executor, _validate_cookie, cookie)
     except Exception as e:
-        logging.error("_validate_cookie failed: %s", e)
-        await msg.edit_text(t(user_id, "invalid_cookie"))
+        logging.error(
+            "_validate_cookie failed: %s",
+            type(e).__name__,
+        )
+        await msg.edit_text(
+            "Не удалось подключиться к Roblox через прокси. "
+            "Проверьте настройки прокси и повторите попытку."
+        )
         return WAITING_MENU
     if r.status_code != 200:
         await msg.edit_text(t(user_id, "invalid_cookie"))
@@ -3200,7 +3259,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── ЭТАП 1: Быстрая проверка без 2FA (быстро ссылка = нет 2FA) ──
     # Проверяем напрямую: если на аккаунте нет 2FA, Roblox выдаст ссылку за 1-2 сек бесплатно!
-    fast_link = await loop.run_in_executor(executor, get_url_via_api, cookie, method)
+    fast_result = await loop.run_in_executor(
+        executor, get_url_via_api, cookie, method
+    )
+    fast_link = fast_result.get("link")
     elapsed = round(_time.time() - _start_time)
 
     if fast_link and _is_persona_link(fast_link):
@@ -3224,6 +3286,32 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown",
             reply_markup=main_menu_kb(user_id),
+        )
+        return WAITING_MENU
+
+    if fast_result.get("status") != "2fa_required":
+        lang = db_get_lang(user_id) or "ru"
+
+        await msg.edit_text(
+            (
+                "Не удалось получить ссылку: ошибка подключения, "
+                "ограничение Roblox или неожиданный ответ. "
+                "Это не подтверждает наличие 2FA. "
+                "Попробуйте позже. Попытка не списана."
+            )
+            if lang == "ru"
+            else (
+                "Could not obtain the link: connection error, "
+                "Roblox restriction or unexpected response. "
+                "This does not confirm 2FA. "
+                "Try again later. No attempt was charged."
+            ),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    t(user_id, "btn_back"),
+                    callback_data="main_menu",
+                )
+            ]]),
         )
         return WAITING_MENU
 
@@ -3859,7 +3947,8 @@ def _create_worker_app():
     ]
 
     def _wmake_session(cookie, proxy_str=None):
-        s = requests.Session()
+        proxy = _wproxy_dict(proxy_str) if proxy_str else get_next_proxy()
+        s = _ProxyOnlySession(proxy)
         s.cookies[".ROBLOSECURITY"] = cookie
         s.headers.update({
             "User-Agent": _random.choice(_WUA),
@@ -3867,10 +3956,6 @@ def _create_worker_app():
             "Accept": "application/json, text/plain, */*",
             "Origin": "https://www.roblox.com",
         })
-        if proxy_str:
-            pd = _wproxy_dict(proxy_str)
-            if pd:
-                s.proxies.update(pd)
         return s
 
     def _wbody(method):
