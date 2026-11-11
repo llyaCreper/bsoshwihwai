@@ -1212,7 +1212,7 @@ TEXTS = {
         "btn_buy":           "Купить попытки",
         "btn_promo":         "Промокод",
         "btn_top":           "Топ пользователей",
-        "btn_help":          "Помощь",
+        "btn_help":          "Инструкция",
         "btn_support":       "Саппорт",
         "btn_admin":         "Админ панель",
         "btn_back":          "Назад",
@@ -1232,20 +1232,19 @@ TEXTS = {
         "sub_none":          "❌ Подписки нет",
         "sub_bought":        "✅ Подписка активирована!\n{desc}",
         "help_text": (
-            "📖 *Инструкция*\n\n"
-            "┌─ 📷 *Ссылка Camera (Face)* — $1.0\n"
-            "│   • Persona\\-ссылка для селфи\n"
+            "📖 Инструкция\n\n"
+            "┌─ 📷 Ссылка Camera (Face) — $1.25\n"
+            "│   • Persona-ссылка для селфи\n"
             "│   • Метод: прямая ссылка\n"
             "└─ • Время: 30 секунд\n\n"
-            "┌─ 🪪 *Ссылка ID (Паспорт)* — $1.0\n"
-            "│   • Persona\\-ссылка для документов\n"
+            "┌─ 🪪 Ссылка ID (Паспорт) — $1.25\n"
+            "│   • Persona-ссылка для документов\n"
             "│   • Метод: прямая ссылка\n"
-            "└─ • Время: 30 секунд\n\n"
-            "⚠️ *Важно*\n"
-            "• Дублируйте кук или убирайте IP\\-lock\n"
-            "• Верифицированные аккаунты не подходят\n"
-            "• Если вы не хотите ломание куков — бот и владелец не советует фрешать куки\n\n"
-            "📌 Поддержка: @dedbed12"
+            "└─• Время: 30 секунд\n\n"
+            "⚠️ Важно\n"
+            "• Дублируйте кук или убирайте IP-lock\n"
+            "• Верифицированные аккаунты не подходят\n\n"
+            "📌 Поддержка: @bedbed12"
         ),
         "top_title":         "*Топ пользователей*\n",
         "top_empty":         "Пока никто не совершил покупок.",
@@ -2074,7 +2073,7 @@ def main_menu_kb(user_id=None):
          InlineKeyboardButton(T["btn_promo"], callback_data="promo")],
         [InlineKeyboardButton(T["btn_top"], callback_data="top")],
         [InlineKeyboardButton(T["btn_help"], callback_data="help"),
-         InlineKeyboardButton(T["btn_support"], url="https://t.me/dedbed12")],
+         InlineKeyboardButton(T["btn_support"], url="https://t.me/bedbed12")],
     ]
     if user_id and user_id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton(T["btn_admin"], callback_data="admin")])
@@ -2342,9 +2341,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "help":
         await query.edit_message_text(
             t(user_id, "help_text"),
-            parse_mode="MarkdownV2",
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
+                InlineKeyboardButton(
+                    t(user_id, "btn_back"),
+                    callback_data="main_menu",
+                )
             ]]),
         )
         return WAITING_MENU
