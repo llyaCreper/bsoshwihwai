@@ -112,7 +112,7 @@ def _load_proxy_pool() -> list[str]:
     # 3. Список из PROXY_LIST
     env_list = os.environ.get("PROXY_LIST", "").strip()
     if env_list:
-        for line in env_list.replace(";", "\n").splitlines():
+        for line in env_list.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 proxies.append(line)
@@ -157,7 +157,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
       http://login:pass@hostname:port
     Протокол берётся из env PROXY_PROTOCOL (по умолчанию http).
     """
-    s = proxy_str.strip()
+    s = proxy_str.strip().replace("\\:", ":")
     if not s:
         return None
 
@@ -189,7 +189,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
         elif d.isdigit():
             login, password, host, port = a, b, c, d
         else:
-            logging.warning("Неизвестный формат прокси (4 части): %s", s)
+            logging.warning("Неизвестный формат прокси (4 части)")
             return None
 
         url = f"{protocol}://{_url_quote(login, safe='')}:{_url_quote(password, safe='')}@{host}:{port}"
@@ -209,7 +209,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
             login, password = left_parts[0], left_parts[1] if len(left_parts) > 1 else ""
             host, port = right_parts
         else:
-            logging.warning("Неизвестный формат прокси (@): %s", s)
+            logging.warning("Неизвестный формат прокси (@)")
             return None
         url = f"{protocol}://{_url_quote(login, safe='')}:{_url_quote(password, safe='')}@{host}:{port}"
         return {"http": url, "https": url}
@@ -219,7 +219,7 @@ def _parse_proxy(proxy_str: str) -> dict | None:
         url = f"{protocol}://{s}"
         return {"http": url, "https": url}
 
-    logging.warning("Неизвестный формат прокси: %s", s)
+    logging.warning("Неизвестный формат прокси")
     return None
 
 
@@ -1880,98 +1880,90 @@ def check_invoice(invoice_id):
 # ──────────────────────────── xRocket ────────────────────────────
 
 def xrocket_create_invoice(amount: float, attempts: int):
-    """
-    Создаёт инвойс xRocket Pay API v2 (новый API).
-    Endpoint: POST https://pay.api.xrocket.exchange/api/v1/invoices
-    Auth: Authorization: Bearer TOKEN
-    Response: { id, links: { web_link, ... }, status, ... }
-    """
+    """Создаёт одноразовый счёт xRocket Pay API, версия Current."""
     if not XROCKET_TOKEN:
+        logging.warning("xRocket: XROCKET_TOKEN не настроен")
         return None
+
     try:
         r = requests.post(
             "https://pay.api.xrocket.exchange/api/v1/invoices",
             headers={
                 "Authorization": f"Bearer {XROCKET_TOKEN}",
-                "Content-Type":  "application/json",
-                "Accept":        "application/json",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
             },
             json={
-                "amount":      str(round(amount, 2)),
-                "currency":    "USDT",
+                "priceAmount": f"{amount:.2f}",
+                "priceCurrency": "USDT",
                 "description": f"Roblox Bot: {attempts} попыток 2FA",
                 "numPayments": 1,
             },
             timeout=15,
         )
-        logging.info("xRocket create invoice status=%s body=%s", r.status_code, r.text[:300])
-        if r.status_code in (200, 201):
+
+        if 200 <= r.status_code < 300:
             inv = r.json()
-            # Новый API возвращает объект напрямую (не обёрнут в data/success)
-            # links.web_link — ссылка для оплаты
-            links    = inv.get("links") or {}
-            pay_url  = (links.get("web_link") or links.get("webLink") or
-                        inv.get("payUrl") or inv.get("link") or inv.get("url") or "")
-            inv_id   = str(inv.get("id") or inv.get("invoiceId") or "")
+            pay_url = (inv.get("links") or {}).get("telegramBotLink")
+            inv_id = inv.get("id")
+
             if not pay_url or not inv_id:
-                logging.warning("xRocket: нет pay_url или id в ответе: %s", inv)
+                logging.warning(
+                    "xRocket: в ответе нет id или links.telegramBotLink"
+                )
                 return None
-            return {"invoice_id": inv_id, "pay_url": pay_url}
-        logging.warning("xRocket create error %s: %s", r.status_code, r.text[:300])
+
+            return {
+                "invoice_id": str(inv_id),
+                "pay_url": pay_url,
+            }
+
+        logging.warning(
+            "xRocket create error %s: %s",
+            r.status_code,
+            r.text[:300],
+        )
         return None
+
     except Exception as e:
         logging.error("xrocket_create_invoice: %s", e)
         return None
 
-
 def xrocket_check_invoice(invoice_id: str) -> str | None:
-    """
-    Проверяет статус инвойса xRocket Pay API v2.
-    GET https://pay.api.xrocket.exchange/api/v1/invoices/{id}
-    Response: { status: "active" | "paid" | "expired" | ... }
-    """
+    """Проверяет статус счёта xRocket Pay API."""
     if not XROCKET_TOKEN:
         return None
+
     try:
         r = requests.get(
-            f"https://pay.api.xrocket.exchange/api/v1/invoices/{invoice_id}",
+            "https://pay.api.xrocket.exchange/api/v1/invoice",
+            params={"invoiceId": invoice_id},
             headers={
                 "Authorization": f"Bearer {XROCKET_TOKEN}",
-                "Accept":        "application/json",
+                "Accept": "application/json",
             },
             timeout=15,
         )
-        if r.status_code == 200:
-            inv    = r.json()
-            status = (inv.get("status") or "").lower()
-            return "paid" if status in ("paid", "completed", "success") else status
-        logging.warning("xRocket check error %s: %s", r.status_code, r.text[:200])
+
+        if 200 <= r.status_code < 300:
+            inv = r.json()
+            status = inv.get("status")
+
+            if isinstance(status, str) and status:
+                return status
+
+            return None
+
+        logging.warning(
+            "xRocket check error %s: %s",
+            r.status_code,
+            r.text[:200],
+        )
         return None
+
     except Exception as e:
         logging.error("xrocket_check_invoice: %s", e)
         return None
-
-
-async def send_log(context, user_id, username, method, elapsed_sec, has_2fa=False):
-    if not LOG_CHANNEL_ID:
-        logging.warning("send_log: LOG_CHANNEL_ID не задан")
-        return
-    try:
-        cost    = "$1.00" if has_2fa else "БЕСПЛАТНО"
-        service = "Camera" if method == "camera" else "ID"
-        msg = (
-            f"✅ УСПЕШНО\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 ID: {user_id} (@{escape_md(username)})\n"
-            f"⚙️ Услуга: {service}\n"
-            f"✅ Результат: Ссылка получена\n"
-            f"⏲️ Время: {round(elapsed_sec)} сек\n"
-            f"💳 Сумма: {cost}"
-        )
-        await context.bot.send_message(chat_id=int(LOG_CHANNEL_ID), text=msg)
-    except Exception as e:
-        logging.warning("send_log error: %s", e)
-
 
 def main_menu_kb(user_id=None):
     lang = (db_get_lang(user_id) or "ru") if user_id else "ru"
@@ -2550,7 +2542,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("check_"):
         inv_key = data[6:]
-        raw_id  = inv_key.split("_")[-1]
+
+        if inv_key.startswith("xr_sub_"):
+            raw_id = inv_key[len("xr_sub_"):].partition("_")[2]
+        elif inv_key.startswith("xr_"):
+            raw_id = inv_key[len("xr_"):]
+        elif inv_key.startswith("sub_"):
+            raw_id = inv_key[len("sub_"):].partition("_")[2]
+        else:
+            raw_id = inv_key.removeprefix("cb_")
 
         payment_preview = pending_payments.get(inv_key)
         if payment_preview is not None and payment_preview.get("user_id") != user_id:
