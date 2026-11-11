@@ -3803,6 +3803,43 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ──────────────────────────── MAIN ────────────────────────────
 
+def _log_chat_id():
+    value = str(LOG_CHANNEL_ID or "").strip()
+
+    if not value:
+        raise ValueError("LOG_CHANNEL_ID не задан")
+
+    return int(value) if value.lstrip("-").isdigit() else value
+
+
+async def testlog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text(
+            "Команда доступна только администратору."
+        )
+        return
+
+    try:
+        sent = await context.bot.send_message(
+            chat_id=_log_chat_id(),
+            text="🧪 Проверка логов: отправка в канал работает.",
+            parse_mode=None,
+        )
+
+    except Exception as e:
+        logging.exception("testlog: ошибка отправки в канал")
+
+        await update.message.reply_text(
+            f"Лог не отправлен.\n{type(e).__name__}: {e}",
+            parse_mode=None,
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Лог отправлен. ID сообщения: {sent.message_id}"
+    )
+
+
 def main():
     token = get_bot_token()
     if not token:
@@ -3924,6 +3961,9 @@ def main():
         per_user=True,
         per_chat=True,
         block=False,
+    )
+    application.add_handler(
+        CommandHandler("testlog", testlog_command)
     )
     application.add_handler(conv)
     application.run_polling(
