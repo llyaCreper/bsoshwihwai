@@ -3965,9 +3965,9 @@ async def send_log(
         service = "Camera" if method == "camera" else "ID"
 
         text = (
-            "✅ Ссылка получена\n"
+            "✅ Успешное получение ссылки ✅\n"
+            "────────────────────────\n"
             f"👤 Пользователь: {username}\n"
-            f"🆔 Telegram ID: {user_id}\n"
             f"⚙️ Услуга: {service}\n"
             f"⏱ Время: {round(elapsed_sec)} сек\n"
             f"💳 Сумма: {cost}"
