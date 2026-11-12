@@ -1373,7 +1373,7 @@ def get_continue_button_text(method: str | None, lang: str | None = None) -> str
 
 # ──────────────────────────── TEXTS ────────────────────────────
 
-USE_CUSTOM_EMOJI = False
+USE_CUSTOM_EMOJI = True
 
 UI_EMOJI_IDS = {
     "attempts": "6037249452824072506",
@@ -2278,15 +2278,13 @@ def format_main_menu(user_id, attempts, sub_status):
     label = "2FA Attempts" if lang == "en" else "Попытки 2FA"
     icon = ui_emoji(UI_EMOJI_IDS["attempts"], "⭐")
 
-    return "\n".join([
-        "<b>Roblox Age Verification Bot</b>",
-        escape(t(user_id, "main_menu_sub")),
-        (
-            f"{icon} {label}: <b>{escape(str(attempts))}</b>"
-            f" | {escape(str(sub_status))}"
-        ),
-        escape(t(user_id, "main_menu_action")),
-    ])
+    return (
+        "<b>Roblox Age Verification Bot</b>\n\n"
+        f"{escape(t(user_id, 'main_menu_sub'))}\n\n"
+        f"{icon} {label}: <b>{escape(str(attempts))}</b>"
+        f" | {escape(str(sub_status))}\n\n"
+        f"{escape(t(user_id, 'main_menu_action'))}"
+    )
 
 
 def main_menu_kb(user_id=None):
