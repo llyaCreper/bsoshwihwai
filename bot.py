@@ -1072,10 +1072,7 @@ def format_spending_top(rows):
 
         if i < len(rank_emojis):
             emoji_id, fallback = rank_emojis[i]
-            rank = (
-                f'<tg-emoji emoji-id="{emoji_id}">'
-                f'{fallback}</tg-emoji>'
-            )
+            rank = ui_emoji(emoji_id, fallback)
         else:
             rank = "▫️"
 
@@ -1376,6 +1373,40 @@ def get_continue_button_text(method: str | None, lang: str | None = None) -> str
 
 # ──────────────────────────── TEXTS ────────────────────────────
 
+USE_CUSTOM_EMOJI = False
+
+UI_EMOJI_IDS = {
+    "attempts": "6037249452824072506",
+    "camera": "5890744068203352126",
+    "id": "5936017305585586269",
+    "important": "5881702736843511327",
+    "support": "5796440171364749940",
+    "with_2fa": "5879895758202735862",
+    "without_2fa": "6034962180875490251",
+}
+
+
+def ui_emoji(emoji_id, fallback):
+    if USE_CUSTOM_EMOJI:
+        return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    return fallback
+
+
+def ui_button(user_id, text_key, callback_data, emoji_key):
+    text = t(user_id, text_key).replace("🔐", "🔒")
+
+    if USE_CUSTOM_EMOJI:
+        return InlineKeyboardButton(
+            text.partition(" ")[2],
+            callback_data=callback_data,
+            api_kwargs={
+                "icon_custom_emoji_id": UI_EMOJI_IDS[emoji_key]
+            },
+        )
+
+    return InlineKeyboardButton(text, callback_data=callback_data)
+
+
 TEXTS = {
     "ru": {
         "main_menu_title": "<b>Roblox Age Verification Bot</b>",
@@ -1406,19 +1437,23 @@ TEXTS = {
         "sub_none":          "❌ Подписки нет",
         "sub_bought":        "✅ Подписка активирована!\n{desc}",
         "help_text": (
-            "📖 Инструкция\n\n"
-            "┌─ 📷 Ссылка Camera (Face) — $1.25\n"
+            "<b>Инструкция</b>\n\n"
+            f"┌─ {ui_emoji(UI_EMOJI_IDS['camera'], '📷')} "
+            "Ссылка Camera (Face) — $1.25\n"
             "│   • Persona-ссылка для селфи\n"
             "│   • Метод: прямая ссылка\n"
             "└─ • Время: 30 секунд\n\n"
-            "┌─ 🪪 Ссылка ID (Паспорт) — $1.25\n"
+            f"┌─ {ui_emoji(UI_EMOJI_IDS['id'], '🪪')} "
+            "Ссылка ID (Паспорт) — $1.25\n"
             "│   • Persona-ссылка для документов\n"
             "│   • Метод: прямая ссылка\n"
-            "└─• Время: 30 секунд\n\n"
-            "⚠️ Важно\n"
+            "└─ • Время: 30 секунд\n\n"
+            f"{ui_emoji(UI_EMOJI_IDS['important'], '⚠️')} "
+            "<b>Важно</b>\n"
             "• Дублируйте кук или убирайте IP-lock\n"
             "• Верифицированные аккаунты не подходят\n\n"
-            "📌 Поддержка: @bedbed12"
+            f"{ui_emoji(UI_EMOJI_IDS['support'], '📌')} "
+            "Поддержка: @bedbed12"
         ),
         "top_title":         "*Топ пользователей*\n",
         "top_empty":         "Пока никто не совершил покупок.",
@@ -2238,6 +2273,22 @@ def xrocket_check_invoice(invoice_id: str) -> str | None:
         logging.error("xrocket_check_invoice: %s", e)
         return None
 
+def format_main_menu(user_id, attempts, sub_status):
+    lang = db_get_lang(user_id) or "ru"
+    label = "2FA Attempts" if lang == "en" else "Попытки 2FA"
+    icon = ui_emoji(UI_EMOJI_IDS["attempts"], "⭐")
+
+    return "\n".join([
+        "<b>Roblox Age Verification Bot</b>",
+        escape(t(user_id, "main_menu_sub")),
+        (
+            f"{icon} {label}: <b>{escape(str(attempts))}</b>"
+            f" | {escape(str(sub_status))}"
+        ),
+        escape(t(user_id, "main_menu_action")),
+    ])
+
+
 def main_menu_kb(user_id=None):
     lang = (db_get_lang(user_id) or "ru") if user_id else "ru"
     T    = TEXTS[lang]
@@ -2339,12 +2390,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await loop.run_in_executor(executor, db_upsert_user, user_id, username)
     attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
-    text = (
-        f"{t(user_id, 'main_menu_title')}\n\n"
-        f"{t(user_id, 'main_menu_sub')}\n\n"
-        f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-        f"{t(user_id, 'main_menu_action')}"
-    )
+    text = format_main_menu(user_id, attempts, sub_status)
     await update.message.reply_text(
         text, parse_mode="HTML", reply_markup=main_menu_kb(user_id)
     )
@@ -2360,12 +2406,7 @@ async def handle_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await loop.run_in_executor(executor, db_set_lang, user_id, lang)
 
     attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
-    text = (
-        f"{t(user_id, 'main_menu_title')}\n\n"
-        f"{t(user_id, 'main_menu_sub')}\n\n"
-        f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-        f"{t(user_id, 'main_menu_action')}"
-    )
+    text = format_main_menu(user_id, attempts, sub_status)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
 
@@ -2510,19 +2551,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "main_menu":
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
-        text = (
-            f"{t(user_id, 'main_menu_title')}\n\n"
-            f"{t(user_id, 'main_menu_sub')}\n\n"
-            f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-            f"{t(user_id, 'main_menu_action')}"
-        )
+        text = format_main_menu(user_id, attempts, sub_status)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
     if data == "help":
         await query.edit_message_text(
             t(user_id, "help_text"),
-            parse_mode=None,
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     t(user_id, "btn_back"),
@@ -2921,10 +2957,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "get_link":
         # Build mode buttons based on what admin has enabled
         mode_buttons = []
+
         if SERVICE_NO2FA_ENABLED:
-            mode_buttons.append(InlineKeyboardButton(t(user_id, "btn_no_2fa"), callback_data="2fa_no"))
+            mode_buttons.append(
+                ui_button(
+                    user_id, "btn_no_2fa",
+                    "2fa_no", "without_2fa",
+                )
+            )
+
         if SERVICE_2FA_ENABLED:
-            mode_buttons.append(InlineKeyboardButton(t(user_id, "btn_with_2fa"), callback_data="2fa_yes"))
+            mode_buttons.append(
+                ui_button(
+                    user_id, "btn_with_2fa",
+                    "2fa_yes", "with_2fa",
+                )
+            )
         if not mode_buttons:
             await query.edit_message_text(
                 "⛔ Сервис временно недоступен.\nОбратитесь к администратору.",
@@ -2954,8 +3002,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             t(user_id, "choose_method"),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_camera"), callback_data="choose_camera")],
-                [InlineKeyboardButton(t(user_id, "btn_id"),     callback_data="choose_id")],
+                [
+                    ui_button(
+                        user_id, "btn_camera",
+                        "choose_camera", "camera",
+                    )
+                ],
+                [
+                    ui_button(
+                        user_id, "btn_id",
+                        "choose_id", "id",
+                    )
+                ],
                 [InlineKeyboardButton(t(user_id, "btn_back"),   callback_data="get_link")],
             ]),
         )
@@ -2964,8 +3022,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ("choose_camera", "choose_id"):
         context.user_data["method"]  = "camera" if data == "choose_camera" else "id"
         has_2fa                      = context.user_data.get("has_2fa", False)
-        cookie_prompt_key            = "2fa_ask_cookie" if has_2fa else "no2fa_ask_cookie"
-        await query.edit_message_text(t(user_id, cookie_prompt_key), parse_mode="Markdown")
+        icon_key = "with_2fa" if has_2fa else "without_2fa"
+        fallback = "🔒" if has_2fa else "🔓"
+        icon = ui_emoji(UI_EMOJI_IDS[icon_key], fallback)
+        title = "Режим 2FA" if has_2fa else "Режим БЕЗ 2FA"
+
+        await query.edit_message_text(
+            f"{icon} <b>{title}</b>\n"
+            "Отправь <code>.ROBLOSECURITY</code> cookie",
+            parse_mode="HTML",
+        )
         return WAITING_COOKIE
 
     # ── REFERRAL MENU ──
@@ -3031,12 +3097,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting"] = None
         await query.answer("Вы вышли из админ-панели", show_alert=False)
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
-        text = (
-            f"{t(user_id, 'main_menu_title')}\n\n"
-            f"{t(user_id, 'main_menu_sub')}\n\n"
-            f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-            f"{t(user_id, 'main_menu_action')}"
-        )
+        text = format_main_menu(user_id, attempts, sub_status)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
@@ -3551,11 +3612,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"{t(user_id, 'main_menu_title')}\n\n"
-                f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-                f"{t(user_id, 'main_menu_action')}"
-            ),
+            text=format_main_menu(user_id, attempts, sub_status),
             parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
@@ -3761,11 +3818,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"{t(user_id, 'main_menu_title')}\n\n"
-                f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-                f"{t(user_id, 'main_menu_action')}"
-            ),
+            text=format_main_menu(user_id, attempts, sub_status),
             parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
@@ -3784,11 +3837,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
     await context.bot.send_message(
         chat_id=chat_id,
-        text=(
-            f"{t(user_id, 'main_menu_title')}\n\n"
-            f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-            f"{t(user_id, 'main_menu_action')}"
-        ),
+        text=format_main_menu(user_id, attempts, sub_status),
         parse_mode="HTML",
         reply_markup=main_menu_kb(user_id),
     )
@@ -3928,11 +3977,7 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"{t(user_id, 'main_menu_title')}\n\n"
-                f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
-                f"{t(user_id, 'main_menu_action')}"
-            ),
+            text=format_main_menu(user_id, attempts, sub_status),
             parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
