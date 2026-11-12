@@ -995,6 +995,46 @@ def db_get_top_view(user_id, limit=10):
     return _db_execute_with_retry(_fn)
 
 
+def telegram_display_name(telegram_username, full_name=None):
+    uname = (telegram_username or "").strip().lstrip("@")
+    if uname:
+        return "@" + uname
+    return " ".join((full_name or "").split()) or "Аноним"
+
+
+async def refresh_spending_top_profiles(context, rows, current_user):
+    loop = asyncio.get_running_loop()
+
+    async def refresh(row):
+        uid, uname, full_name, spent, anonymous = row
+        if anonymous:
+            return row
+
+        if uid == current_user.id:
+            profile = current_user
+        else:
+            try:
+                profile = await context.bot.get_chat(uid)
+            except Exception:
+                return row
+
+        uname = profile.username
+        full_name = profile.full_name
+
+        try:
+            await loop.run_in_executor(
+                executor, db_save_top_profile, uid, uname, full_name
+            )
+        except Exception:
+            logging.warning(
+                "Не удалось сохранить профиль пользователя %s", uid
+            )
+
+        return uid, uname, full_name, spent, anonymous
+
+    return await asyncio.gather(*(refresh(row) for row in rows))
+
+
 def format_spending_top(rows):
     lines = [
         "👑 Топ по тратам",
@@ -1006,10 +1046,8 @@ def format_spending_top(rows):
     for i, (uid, uname, full_name, spent, anonymous) in enumerate(rows):
         if anonymous:
             name = "Аноним"
-        elif uname:
-            name = "@" + uname.lstrip("@")
         else:
-            name = "Без username"
+            name = telegram_display_name(uname, full_name)
 
         name = " ".join(name.split()) or "Аноним"
         medal = medals[i] if i < 3 else "▫️"
@@ -2492,6 +2530,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             10,
         )
 
+        rows = await refresh_spending_top_profiles(context, rows, tg)
+
         await query.edit_message_text(
             format_spending_top(rows),
             parse_mode=None,
@@ -3479,7 +3519,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         msg_text = t(user_id, "link_received")
         await msg.edit_text(msg_text, parse_mode="Markdown", reply_markup=link_kb)
-        await send_log(context, user_id, username, method, elapsed, has_2fa=False)
+        await send_log(
+            context, user_id, username, method, elapsed,
+            has_2fa=False, telegram_user=tg,
+        )
         attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
         await context.bot.send_message(
             chat_id=chat_id,
@@ -3661,7 +3704,10 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg_text = t(user_id, "link_received")
 
         await msg.edit_text(msg_text, parse_mode="Markdown", reply_markup=link_kb)
-        await send_log(context, user_id, username, method, elapsed, has_2fa=has_2fa)
+        await send_log(
+            context, user_id, username, method, elapsed,
+            has_2fa=has_2fa, telegram_user=tg,
+        )
         # Реферальное начисление: только если реально списали попытку (платная 2FA)
         if has_2fa and attempt_was_deducted is False is False:
             # has_2fa может стать False если ссылка пришла без email-кода → бесплатно, пропускаем
@@ -3828,7 +3874,10 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await thinking_msg.edit_text(
             t(user_id, "link_received"), parse_mode="Markdown", reply_markup=link_kb
         )
-        await send_log(context, user_id, username, ctx["method"], 0, has_2fa=True)
+        await send_log(
+            context, user_id, username, ctx["method"], 0,
+            has_2fa=True, telegram_user=tg,
+        )
         # Реферальное начисление: 20% рефереру за успешную 2FA
         try:
             referrer_id = await loop.run_in_executor(executor, db_get_referrer, user_id)
@@ -3955,6 +4004,7 @@ async def send_log(
     method,
     elapsed_sec,
     has_2fa=False,
+    telegram_user=None,
 ):
     try:
         cost = (
@@ -3964,14 +4014,21 @@ async def send_log(
         )
         service = "Camera" if method == "camera" else "ID"
 
-        try:
-            chat = await context.bot.get_chat(user_id)
-            user_label = (
-                f"@{chat.username}" if chat.username
-                else "Без username"
-            )
-        except Exception:
-            user_label = "Username недоступен"
+        profile = telegram_user
+
+        if profile is None:
+            try:
+                profile = await context.bot.get_chat(user_id)
+            except Exception:
+                logging.warning(
+                    "Не удалось получить профиль пользователя %s", user_id
+                )
+
+        user_label = (
+            telegram_display_name(profile.username, profile.full_name)
+            if profile is not None
+            else telegram_display_name(None, username)
+        )
 
         text = (
             "✅ Успешное получение ссылки ✅\n"
