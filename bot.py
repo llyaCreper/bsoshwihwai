@@ -1009,7 +1009,7 @@ def format_spending_top(rows):
         elif uname:
             name = "@" + uname.lstrip("@")
         else:
-            name = full_name or "Аноним"
+            name = "Без username"
 
         name = " ".join(name.split()) or "Аноним"
         medal = medals[i] if i < 3 else "▫️"
@@ -3964,10 +3964,19 @@ async def send_log(
         )
         service = "Camera" if method == "camera" else "ID"
 
+        try:
+            chat = await context.bot.get_chat(user_id)
+            user_label = (
+                f"@{chat.username}" if chat.username
+                else "Без username"
+            )
+        except Exception:
+            user_label = "Username недоступен"
+
         text = (
             "✅ Успешное получение ссылки ✅\n"
-            "────────────────────────\n"
-            f"👤 Пользователь: {username}\n"
+            "───────────────────────\n"
+            f"👤 Пользователь: {user_label}\n"
             f"⚙️ Услуга: {service}\n"
             f"⏱ Время: {round(elapsed_sec)} сек\n"
             f"💳 Сумма: {cost}"
