@@ -919,6 +919,117 @@ def db_get_all_users():
     return _db_execute_with_retry(_fn)
 
 
+def db_init_top_profiles():
+    with _db() as conn:
+        conn.cursor().execute("""
+            CREATE TABLE IF NOT EXISTS top_profiles (
+                user_id BIGINT PRIMARY KEY,
+                telegram_username TEXT,
+                full_name TEXT,
+                anonymous INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+
+def db_save_top_profile(user_id, telegram_username, full_name):
+    def _fn():
+        with _db() as conn:
+            conn.cursor().execute("""
+                INSERT INTO top_profiles (
+                    user_id, telegram_username, full_name
+                )
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    telegram_username=EXCLUDED.telegram_username,
+                    full_name=EXCLUDED.full_name
+            """, (user_id, telegram_username, full_name))
+
+    _db_execute_with_retry(_fn)
+
+
+def db_toggle_top_anonymity(user_id):
+    def _fn():
+        with _db() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE top_profiles
+                SET anonymous=1-anonymous
+                WHERE user_id=%s
+                """,
+                (user_id,),
+            )
+
+    _db_execute_with_retry(_fn)
+
+
+def db_get_top_view(user_id, limit=10):
+    def _fn():
+        with _db() as conn:
+            c = conn.cursor()
+
+            c.execute("""
+                SELECT
+                    u.user_id,
+                    p.telegram_username,
+                    COALESCE(p.full_name, u.username, ''),
+                    u.spent,
+                    COALESCE(p.anonymous, 0)
+                FROM users u
+                LEFT JOIN top_profiles p
+                    ON p.user_id=u.user_id
+                WHERE u.spent > 0
+                ORDER BY u.spent DESC, u.user_id ASC
+                LIMIT %s
+            """, (limit,))
+
+            rows = c.fetchall()
+
+            c.execute(
+                "SELECT anonymous FROM top_profiles WHERE user_id=%s",
+                (user_id,),
+            )
+            own = c.fetchone()
+
+            return rows, bool(own and own[0])
+
+    return _db_execute_with_retry(_fn)
+
+
+def format_spending_top(rows):
+    lines = [
+        "👑 Топ по тратам",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    medals = ["🥇", "🥈", "🥉"]
+
+    for i, (uid, uname, full_name, spent, anonymous) in enumerate(rows):
+        if anonymous:
+            name = "Аноним"
+        elif uname:
+            name = "@" + uname.lstrip("@")
+        else:
+            name = full_name or "Аноним"
+
+        name = " ".join(name.split()) or "Аноним"
+        medal = medals[i] if i < 3 else "▫️"
+
+        lines.append(
+            f"{medal} {name}  •  ${float(spent):.2f}"
+        )
+
+    if not rows:
+        lines.append("Пока никто не совершил покупок.")
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "Сделай заказ и попади в топ!",
+    ])
+
+    return "\n".join(lines)
+
+
 def db_get_top(limit=10):
     def _fn():
         with _db() as conn:
@@ -2122,6 +2233,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = tg.username or tg.first_name or "Аноним"
 
     loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        executor,
+        db_save_top_profile,
+        user_id,
+        tg.username,
+        tg.full_name,
+    )
     is_new = await loop.run_in_executor(executor, db_is_new_user, user_id)
 
     if is_new:
@@ -2351,22 +2469,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_MENU
 
-    if data == "top":
-        rows   = await loop.run_in_executor(executor, db_get_top, 10)
-        medals = ["🥇", "🥈", "🥉"]
-        lines  = [t(user_id, "top_title")]
-        if not rows:
-            lines.append(t(user_id, "top_empty"))
-        else:
-            for i, (uid, uname, spent) in enumerate(rows):
-                medal = medals[i] if i < 3 else f"{i + 1}."
-                lines.append(f"{medal} {uname or '---'} — ${round(spent, 2)}")
+    if data in ("top", "top_toggle_anon"):
+        await loop.run_in_executor(
+            executor,
+            db_save_top_profile,
+            user_id,
+            tg.username,
+            tg.full_name,
+        )
+
+        if data == "top_toggle_anon":
+            await loop.run_in_executor(
+                executor,
+                db_toggle_top_anonymity,
+                user_id,
+            )
+
+        rows, anonymous = await loop.run_in_executor(
+            executor,
+            db_get_top_view,
+            user_id,
+            10,
+        )
+
         await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")
-            ]]),
+            format_spending_top(rows),
+            parse_mode=None,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔒 Анонимность: "
+                        + ("вкл" if anonymous else "выкл"),
+                        callback_data="top_toggle_anon",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        t(user_id, "btn_back"),
+                        callback_data="main_menu",
+                    )
+                ],
+            ]),
         )
         return WAITING_MENU
 
@@ -3896,6 +4039,7 @@ def main():
     CRYPTO_BOT_TOKEN = load_crypto_bot_token()
     LOG_CHANNEL_ID = load_log_channel_id()
     db_init()
+    db_init_top_profiles()
 
     if ADMIN_IDS:
         logging.info("👑 Администраторы загружены (%d): %s", len(ADMIN_IDS), sorted(list(ADMIN_IDS)))
