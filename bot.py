@@ -19,6 +19,7 @@ import logging
 import requests
 import asyncio
 from urllib.parse import quote as _url_quote
+from html import escape
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -1041,20 +1042,44 @@ def format_spending_top(rows):
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
-    medals = ["🥇", "🥈", "🥉"]
+
+    rank_emojis = [
+        ("5794164805065514131", "1️⃣"),
+        ("5794085322400733645", "2️⃣"),
+        ("5794280000383358988", "3️⃣"),
+        ("5794241397217304511", "4️⃣"),
+        ("5793985348446984682", "5️⃣"),
+        ("5794324702402976226", "6️⃣"),
+        ("5793942849745591465", "7️⃣"),
+        ("5793926687783655907", "8️⃣"),
+        ("5793979472931723221", "9️⃣"),
+        ("5794375786743995258", "🔟"),
+    ]
 
     for i, (uid, uname, full_name, spent, anonymous) in enumerate(rows):
+        uname = (uname or "").strip().lstrip("@")
+
         if anonymous:
             name = "Аноним"
         else:
-            name = telegram_display_name(uname, full_name)
+            name = "@" + uname if uname else full_name or "Аноним"
 
-        name = " ".join(name.split()) or "Аноним"
-        medal = medals[i] if i < 3 else "▫️"
+        name = escape(" ".join(name.split()))
 
-        lines.append(
-            f"{medal} {name}  •  ${float(spent):.2f}"
-        )
+        if not anonymous and uname:
+            url = escape("https://t.me/" + uname, quote=True)
+            name = f'<a href="{url}">{name}</a>'
+
+        if i < len(rank_emojis):
+            emoji_id, fallback = rank_emojis[i]
+            rank = (
+                f'<tg-emoji emoji-id="{emoji_id}">'
+                f'{fallback}</tg-emoji>'
+            )
+        else:
+            rank = "▫️"
+
+        lines.append(f"{rank} {name}  •  ${float(spent):.2f}")
 
     if not rows:
         lines.append("Пока никто не совершил покупок.")
@@ -1353,9 +1378,9 @@ def get_continue_button_text(method: str | None, lang: str | None = None) -> str
 
 TEXTS = {
     "ru": {
-        "main_menu_title":   "*Roblox Age Verification Bot*",
+        "main_menu_title": "<b>Roblox Age Verification Bot</b>",
         "main_menu_sub":     "Сервис для получения ссылки by @dedbed12",
-        "main_menu_attempts":"🔐 Попытки 2FA: *{attempts}* | {sub_status}",
+        "main_menu_attempts": '<tg-emoji emoji-id="6037249452824072506">⭐</tg-emoji> Попытки 2FA: <b>{attempts}</b> | {sub_status}',
         "main_menu_action":  "Выберите действие ниже:",
         "btn_get_link":      "Получить ссылку",
         "btn_buy":           "Купить попытки",
@@ -1440,9 +1465,9 @@ TEXTS = {
         "ref_no_bot":        "Не удалось получить имя бота.",
     },
     "en": {
-        "main_menu_title":   "*Roblox Age Verification Bot*",
+        "main_menu_title": "<b>Roblox Age Verification Bot</b>",
         "main_menu_sub":     "Service for getting verification link by @dedbed12",
-        "main_menu_attempts":"🔐 2FA Attempts: *{attempts}* | {sub_status}",
+        "main_menu_attempts": '<tg-emoji emoji-id="6037249452824072506">⭐</tg-emoji> 2FA Attempts: <b>{attempts}</b> | {sub_status}',
         "main_menu_action":  "Choose an action below:",
         "btn_get_link":      "Get link",
         "btn_buy":           "Buy attempts",
@@ -2321,7 +2346,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t(user_id, 'main_menu_action')}"
     )
     await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id)
+        text, parse_mode="HTML", reply_markup=main_menu_kb(user_id)
     )
     return WAITING_MENU
 
@@ -2341,7 +2366,7 @@ async def handle_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
         f"{t(user_id, 'main_menu_action')}"
     )
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
     return WAITING_MENU
 
 
@@ -2491,7 +2516,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
             f"{t(user_id, 'main_menu_action')}"
         )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
     if data == "help":
@@ -2534,7 +2559,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             format_spending_top(rows),
-            parse_mode=None,
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -3012,7 +3037,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
             f"{t(user_id, 'main_menu_action')}"
         )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(user_id))
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(user_id))
         return WAITING_MENU
 
     if data == "admin_change_password":
@@ -3531,7 +3556,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
                 f"{t(user_id, 'main_menu_action')}"
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
         return WAITING_MENU
@@ -3741,7 +3766,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
                 f"{t(user_id, 'main_menu_action')}"
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
         return WAITING_MENU
@@ -3764,7 +3789,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
             f"{t(user_id, 'main_menu_action')}"
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=main_menu_kb(user_id),
     )
     return WAITING_MENU
@@ -3908,7 +3933,7 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{t(user_id, 'main_menu_attempts', attempts=attempts, sub_status=sub_status)}\n\n"
                 f"{t(user_id, 'main_menu_action')}"
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=main_menu_kb(user_id),
         )
         return WAITING_MENU
