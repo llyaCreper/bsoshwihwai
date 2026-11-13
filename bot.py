@@ -3824,46 +3824,25 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         str(result)[:120] if result else None,
     )
 
-    # ── Challenge от воркера: нужен email-код ──
-    if isinstance(result, dict) and result.get("challengeId") and result.get("csrf"):
-        lang = db_get_lang(user_id) or "ru"
-        _cleanup_pending_2fa()
-        async with _pending_2fa_lock:
-          # Если запись уже есть (двойной вызов) — возвращаем попытку и выходим
-          if user_id in pending_2fa and attempt_was_deducted:
-              try:
-                  await loop.run_in_executor(executor, db_upsert_user, user_id, username, 1, -PRICE_2FA)
-              except Exception as e:
-                  logging.error("pending_2fa double-write: не удалось вернуть попытку: %s", e)
-              await msg.edit_text(t(user_id, "failed_returned"))
-              return WAITING_MENU
-          pending_2fa[user_id] = {
-              "cookie":               cookie,
-              "csrf":                 result["csrf"],
-              "challenge_id":         result["challengeId"],
-              # innerChallengeId — реальный ID для twostepverification API;
-              # если воркер не вернул — используем outer как fallback
-              "inner_challenge_id":   result.get("innerChallengeId") or result["challengeId"],
-              "user_roblox_id":       user.get("id"),
-              "method":               method,         # "camera" or "id"
-              "attempt_was_deducted": attempt_was_deducted,
-              "chat_id":              chat_id,
-              "username":             username,
-              "created_at":           _time.time(),
-          }
-        code_prompt = (
-            "📧 *Код отправлен на email*\n\nВведите 6-значный код из письма Roblox:"
-            if lang == "ru" else
-            "📧 *Code sent to email*\n\nEnter the 6-digit code from Roblox email:"
+    # ── Challenge от воркера (2FA email) — считаем как неудачу, ссылку получить не удалось ──
+    if isinstance(result, dict) and result.get("challengeId"):
+        logging.info("Воркер вернул challenge (требует email-код) — завершаем как неудачу")
+        if attempt_was_deducted:
+            try:
+                await loop.run_in_executor(
+                    executor, db_upsert_user, user_id, username, 1, -PRICE_2FA
+                )
+            except Exception as e:
+                logging.error("challenge: не удалось вернуть попытку: %s", e)
+        await msg.edit_text(t(user_id, "failed_returned"))
+        attempts, sub_status = await loop.run_in_executor(executor, _sub_status_text, user_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=format_main_menu(user_id, attempts, sub_status),
+            parse_mode="HTML",
+            reply_markup=main_menu_kb(user_id),
         )
-        await msg.edit_text(
-            code_prompt,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(t(user_id, "btn_cancel"), callback_data="cancel_2fa")
-            ]]),
-        )
-        return WAITING_2FA_CODE
+        return WAITING_MENU
 
     # ── Ссылка получена ──
     link_ok = result and isinstance(result, str) and _is_persona_link(result)
@@ -4384,10 +4363,6 @@ def main():
                     receive_text,
                 ),
             ],
-            WAITING_2FA_CODE: [
-                CallbackQueryHandler(receive_2fa_code),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_2fa_code),
-            ],
         },
         fallbacks=[
             CommandHandler("start", start),
@@ -4574,8 +4549,6 @@ def _create_worker_app():
             return None
 
         total = 0
-        email_sent = False
-        active_cid = active_inner = active_csrf = None
         consecutive_429 = 0
         start = _time.time()
         workers = max(len(_wproxy_pool) * 2, 50) if _wproxy_pool else 20
@@ -4594,14 +4567,6 @@ def _create_worker_app():
                     if r.get("link") and not found_link:
                         found_link = r["link"]
                         break
-                    if not email_sent and r.get("status") == 403 and r.get("challengeType") and r.get("challengeId"):
-                        req_csrf = r.get("newCsrf") or csrf
-                        ok, inner, new_csrf = _wsend_email(cookie, uid, req_csrf, r["challengeId"], r.get("challengeMeta", ""))
-                        if ok:
-                            email_sent = True
-                            active_cid   = r["challengeId"]
-                            active_inner = inner
-                            active_csrf  = new_csrf
                     if r.get("newCsrf"):
                         csrf = r["newCsrf"]
                 if found_link:
@@ -4619,9 +4584,6 @@ def _create_worker_app():
 
         if found_link:
             return found_link
-        if email_sent and active_cid:
-            return {"challengeId": active_cid, "innerChallengeId": active_inner or active_cid,
-                    "csrf": active_csrf or csrf, "emailSent": True}
         return None
 
     _WMAXCON = int(os.environ.get("MAX_CONCURRENT_REQUESTS", 3))
@@ -4653,8 +4615,6 @@ def _create_worker_app():
             _wsem.release()
         if isinstance(result, str):
             return _wjsonify({"link": result})
-        if isinstance(result, dict) and result.get("challengeId"):
-            return _wjsonify(result)
         return _wjsonify({"error": "не смог получить"}), 500
 
     return _wapp
