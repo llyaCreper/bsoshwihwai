@@ -4443,7 +4443,7 @@ def _create_worker_app():
     def _wproxy_dict(proxy_str):
         return _parse_proxy(proxy_str) if proxy_str else None
 
-    _WDEADLINE   = int(os.environ.get("DEADLINE", 600))
+    _WDEADLINE   = int(os.environ.get("DEADLINE", 480))
     _WBATCH_SIZE = int(os.environ.get("BATCH_SIZE", max(len(_wproxy_pool), 20)))
     _WPAUSE      = float(os.environ.get("PAUSE_BURST", 0.02))
     _WPAUSE_429  = float(os.environ.get("PAUSE_429", 1.5))
@@ -4571,14 +4571,6 @@ def _create_worker_app():
                         csrf = r["newCsrf"]
                 if found_link:
                     break
-                has_429 = any(r.get("status") == 429 for r in results)
-                consecutive_429 = (consecutive_429 + 1) if has_429 else 0
-                if consecutive_429 >= 3:
-                    _time.sleep(min(_WPAUSE_429 * (2 ** (consecutive_429 - 3)), 30.0))
-                elif has_429:
-                    _time.sleep(_WPAUSE_429)
-                else:
-                    _time.sleep(_WPAUSE)
         finally:
             ex.shutdown(wait=False, cancel_futures=True)
 
