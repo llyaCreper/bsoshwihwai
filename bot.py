@@ -1383,6 +1383,8 @@ UI_EMOJI_IDS = {
     "support": "5796440171364749940",
     "with_2fa": "5879895758202735862",
     "without_2fa": "6034962180875490251",
+    "xrocket": "5372951469651702259",
+    "cryptobot": "5350836150468650559",
 }
 
 
@@ -2478,46 +2480,117 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     return WAITING_ADMIN_PASSWORD
 
-async def _show_payment_method_screen(query, user_id: int, count: int, total: float, discount: float, lang: str):
-    """Показывает экран выбора метода оплаты с деталями инвойса."""
-    disc_str = f"−{int(discount*100)}%" if discount else ("без скидки" if lang == "ru" else "no discount")
-    if lang == "ru":
-        text = (
-            f"💳 *Выберите способ оплаты*\n\n"
-            f"Инвойс: `0`\n"
-            f"Попыток: *{count}*\n"
-            f"Сумма: *${total:.2f}*\n"
-            f"Скидка: {disc_str}\n\n"
-            f"Нажмите кнопку ниже для оплаты в USD.\n"
-            f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
+def format_payment_screen(
+    user_id, amount, *, attempts=None, days=None,
+    invoice_id=0, method=None
+):
+    ru = (db_get_lang(user_id) or "ru") == "ru"
+
+    if method:
+        title = (
+            f"Оплата через {method}"
+            if ru else f"Payment via {method}"
         )
     else:
-        text = (
-            f"💳 *Choose payment method*\n\n"
-            f"Invoice: `0`\n"
-            f"Attempts: *{count}*\n"
-            f"Amount: *${total:.2f}*\n"
-            f"Discount: {disc_str}\n\n"
-            f"Tap a button below to pay in USD.\n"
-            f"After payment tap «I paid», attempts will be credited immediately."
+        title = (
+            "Выберите способ оплаты"
+            if ru else "Choose payment method"
         )
+
+    if days is not None:
+        if days == 0:
+            period = "Навсегда" if ru else "Forever"
+        else:
+            period = f"{days} дней" if ru else f"{days} days"
+
+        item = (
+            f"Подписка: {period}"
+            if ru else f"Subscription: {period}"
+        )
+        result = (
+            "подписка активируется сразу"
+            if ru else "your subscription will activate immediately"
+        )
+    else:
+        item = (
+            f"Попыток: {attempts}"
+            if ru else f"Attempts: {attempts}"
+        )
+        result = (
+            "попытки зачислятся сразу"
+            if ru else "attempts will be credited immediately"
+        )
+
+    if method:
+        footer = (
+            f"Нажмите кнопку ниже для оплаты в USD.\n"
+            f"После оплаты нажмите «Я оплатил», {result}."
+            if ru else
+            f"Tap the button below to pay in USD.\n"
+            f"After payment tap «I paid», {result}."
+        )
+    else:
+        footer = (
+            "Выберите способ оплаты ниже для оплаты в USD."
+            if ru else
+            "Choose a payment method below to pay in USD."
+        )
+
+    return (
+        f"💳 <b>{escape(title)}</b>\n\n"
+        f"{'Инвойс' if ru else 'Invoice'}: "
+        f"{escape(str(invoice_id))}\n"
+        f"{escape(item)}\n"
+        f"{'Сумма' if ru else 'Amount'}: ${amount:.2f}\n\n"
+        f"{escape(footer)}"
+    )
+
+
+async def _show_payment_method_screen(
+    query, user_id, count, total, discount, lang
+):
+    text = format_payment_screen(
+        user_id, total, attempts=count
+    )
+
     method_buttons = []
+
     if CRYPTO_BOT_TOKEN:
-        method_buttons.append(InlineKeyboardButton("🤖 CryptoBot", callback_data=f"paymethod_cb_{count}"))
+        method_buttons.append(
+            ui_button(
+                user_id, "btn_pay_crypto",
+                f"paymethod_cb_{count}", "cryptobot"
+            )
+        )
+
     if XROCKET_TOKEN:
-        method_buttons.append(InlineKeyboardButton("🚀 xRocket",   callback_data=f"paymethod_xr_{count}"))
+        method_buttons.append(
+            ui_button(
+                user_id, "btn_pay_xrocket",
+                f"paymethod_xr_{count}", "xrocket"
+            )
+        )
+
     if not method_buttons:
         await query.answer(
-            "Способы оплаты временно недоступны." if lang == "ru" else "Payment methods unavailable.",
+            "Способы оплаты временно недоступны."
+            if lang == "ru" else
+            "Payment methods unavailable.",
             show_alert=True,
         )
         return
+
     await query.edit_message_text(
         text,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             method_buttons,
-            [InlineKeyboardButton("◀️ Назад" if lang == "ru" else "◀️ Back", callback_data="buy_attempts")],
+            [
+                InlineKeyboardButton(
+                    "◀️ Назад" if lang == "ru" else "◀️ Back",
+                    callback_data="buy_attempts"
+                )
+            ],
         ]),
     )
 
@@ -2703,15 +2776,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Показываем выбор метода оплаты (как для попыток)
         method_buttons = []
         if CRYPTO_BOT_TOKEN:
-            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_crypto"),  callback_data=f"subpay_cb_{days}"))
+            method_buttons.append(
+                ui_button(
+                    user_id, "btn_pay_crypto",
+                    f"subpay_cb_{days}", "cryptobot"
+                )
+            )
         if XROCKET_TOKEN:
-            method_buttons.append(InlineKeyboardButton(t(user_id, "btn_pay_xrocket"), callback_data=f"subpay_xr_{days}"))
+            method_buttons.append(
+                ui_button(
+                    user_id, "btn_pay_xrocket",
+                    f"subpay_xr_{days}", "xrocket"
+                )
+            )
         if not method_buttons:
             await query.answer(t(user_id, "pay_method_unavail"), show_alert=True)
             return WAITING_BUY
         await query.edit_message_text(
-            t(user_id, "choose_payment", amount=f"{price:.2f}"),
-            parse_mode="Markdown",
+            format_payment_screen(user_id, price, days=days),
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 method_buttons,
                 [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
@@ -2769,11 +2852,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "days": days, "price": price, "desc": desc,
         }
         await query.edit_message_text(
-            f"Счёт на подписку: {desc}\nСумма: ${price}",
+            format_payment_screen(
+                user_id,
+                price,
+                days=days,
+                invoice_id=raw["invoice_id"],
+                method="CryptoBot" if method == "cb" else "xRocket",
+            ),
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(t(user_id, "btn_pay"),       url=pay_url)],
-                [InlineKeyboardButton(t(user_id, "btn_check_pay"), callback_data=f"check_{inv_key}")],
-                [InlineKeyboardButton(t(user_id, "btn_back"),      callback_data="buy_sub")],
+                [InlineKeyboardButton(t(user_id, "btn_pay"), url=pay_url)],
+                [
+                    InlineKeyboardButton(
+                        "✅ Я оплатил"
+                        if (db_get_lang(user_id) or "ru") == "ru"
+                        else "✅ I paid",
+                        callback_data=f"check_{inv_key}"
+                    )
+                ],
+                [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="buy_sub")],
             ]),
         )
         return WAITING_PAYMENT
@@ -2857,32 +2954,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         pending_payments[inv_key] = {"user_id": user_id, "attempts": count, "total": total}
 
-        if lang == "ru":
-            text = (
-                f"💳 *Оплата через {method_label}*\n\n"
-                f"Инвойс: `{inv_number}`\n"
-                f"Попыток: *{count}*\n"
-                f"Сумма: *${total:.2f}*\n"
-                f"Скидка: {disc_str}\n\n"
-                f"Нажмите кнопку ниже для оплаты в USD.\n"
-                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
-            )
-            btn_paid = "✅ Я оплатил"
-        else:
-            text = (
-                f"💳 *Payment via {method_label}*\n\n"
-                f"Invoice: `{inv_number}`\n"
-                f"Attempts: *{count}*\n"
-                f"Amount: *${total:.2f}*\n"
-                f"Discount: {disc_str}\n\n"
-                f"Tap the button below to pay in USD.\n"
-                f"After payment tap «I paid», attempts will be credited immediately."
-            )
-            btn_paid = "✅ I paid"
+        text = format_payment_screen(
+            user_id,
+            total,
+            attempts=count,
+            invoice_id=inv_number,
+            method=method_label,
+        )
+        btn_paid = "✅ Я оплатил" if lang == "ru" else "✅ I paid"
 
         await query.edit_message_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Оплатить" if lang == "ru" else "💳 Pay", url=pay_url)],
                 [InlineKeyboardButton(btn_paid, callback_data=f"check_{inv_key}")],
@@ -3240,32 +3323,25 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Кастомное количество — без скидки
         total = _attempts_price(count)
-        disc_str = "без скидки" if lang == "ru" else "no discount"
-        if lang == "ru":
-            text_msg = (
-                f"💳 *Выберите способ оплаты*\n\n"
-                f"Инвойс: `0`\n"
-                f"Попыток: *{count}*\n"
-                f"Сумма: *${total:.2f}*\n"
-                f"Скидка: {disc_str}\n\n"
-                f"Нажмите кнопку ниже для оплаты в USD.\n"
-                f"После оплаты нажмите «Я оплатил», попытки зачислятся сразу."
-            )
-        else:
-            text_msg = (
-                f"💳 *Choose payment method*\n\n"
-                f"Invoice: `0`\n"
-                f"Attempts: *{count}*\n"
-                f"Amount: *${total:.2f}*\n"
-                f"Discount: {disc_str}\n\n"
-                f"Tap a button below to pay in USD.\n"
-                f"After payment tap «I paid», attempts will be credited immediately."
-            )
+        text_msg = format_payment_screen(
+            user_id, total, attempts=count
+        )
         method_buttons = []
         if CRYPTO_BOT_TOKEN:
-            method_buttons.append(InlineKeyboardButton("🤖 CryptoBot", callback_data=f"paymethod_cb_{count}"))
+            method_buttons.append(
+                ui_button(
+                    user_id, "btn_pay_crypto",
+                    f"paymethod_cb_{count}", "cryptobot"
+                )
+            )
+
         if XROCKET_TOKEN:
-            method_buttons.append(InlineKeyboardButton("🚀 xRocket",   callback_data=f"paymethod_xr_{count}"))
+            method_buttons.append(
+                ui_button(
+                    user_id, "btn_pay_xrocket",
+                    f"paymethod_xr_{count}", "xrocket"
+                )
+            )
         if not method_buttons:
             await update.message.reply_text(
                 "❌ Способы оплаты недоступны." if lang == "ru" else "❌ Payment methods unavailable."
@@ -3273,7 +3349,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WAITING_MENU
         await update.message.reply_text(
             text_msg,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 method_buttons,
                 [InlineKeyboardButton("◀️ Назад" if lang == "ru" else "◀️ Back", callback_data="buy_attempts")],
