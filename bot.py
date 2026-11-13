@@ -1470,9 +1470,24 @@ TEXTS = {
         "checking_cookie":   "Проверяю cookie...",
         "invalid_cookie":    "Неверный cookie! Попробуй снова.\n\n/start",
         "processing":        "Аккаунт: *{name}*\nМетод: *{method}*\nОсталось попыток: *{attempts}*\n\nЖди, получаю ссылку...",
-        "link_received":     "*Ссылка получена!*\n\n⏱ Действует *10 минут* — используй сразу!\n🔗 Одноразовая ссылка:",
+        "link_received": (
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            '<b>Ссылка получена!</b>\n\n'
+            '<tg-emoji emoji-id="6037268453759389862">⏱</tg-emoji> '
+            'Действует <b>10 минут</b> — используй сразу!\n'
+            '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji> '
+            'Одноразовая ссылка:'
+        ),
         "failed_returned":   "❌ Не удалось получить ссылку — попытка возвращена!",
-        "link_received_free_2fa": "*Ссылка получена (без 2FA)*!\n\nПопытка возвращена на баланс (бесплатно).\n\n⏱ Действует *10 минут* — используй сразу!\n🔗 Одноразовая ссылка:",
+        "link_received_free_2fa": (
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            '<b>Ссылка получена (без 2FA)!</b>\n\n'
+            'Попытка возвращена на баланс (бесплатно).\n\n'
+            '<tg-emoji emoji-id="6037268453759389862">⏱</tg-emoji> '
+            'Действует <b>10 минут</b> — используй сразу!\n'
+            '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji> '
+            'Одноразовая ссылка:'
+        ),
         "need_2fa_mode":     "⚠️ *На этом аккаунте включена 2FA!*\n\nПожалуйста, выберите в меню: *🔐 С 2FA*.",
         "method_camera":     "Camera",
         "method_id":         "ID",
@@ -1558,9 +1573,24 @@ TEXTS = {
         "checking_cookie":   "Checking cookie...",
         "invalid_cookie":    "Invalid cookie! Try again.\n\n/start",
         "processing":        "Account: *{name}*\nMethod: *{method}*\nAttempts left: *{attempts}*\n\nPlease wait, obtaining link...",
-        "link_received":     "*Link received!*\n\n⏱ Valid for *10 minutes* — use it now!\n🔗 One-time link:",
+        "link_received": (
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            '<b>Link received!</b>\n\n'
+            '<tg-emoji emoji-id="6037268453759389862">⏱</tg-emoji> '
+            'Valid for <b>10 minutes</b> — use it now!\n'
+            '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji> '
+            'One-time link:'
+        ),
         "failed_returned":   "❌ Failed to get link — attempt returned!",
-        "link_received_free_2fa": "*Link received (No 2FA)*!\n\nAttempt refunded to your balance (free).\n\n⏱ Valid for *10 minutes* — use it now!\n🔗 One-time link:",
+        "link_received_free_2fa": (
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            '<b>Link received (No 2FA)!</b>\n\n'
+            'Attempt refunded to your balance (free).\n\n'
+            '<tg-emoji emoji-id="6037268453759389862">⏱</tg-emoji> '
+            'Valid for <b>10 minutes</b> — use it now!\n'
+            '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji> '
+            'One-time link:'
+        ),
         "need_2fa_mode":     "⚠️ *2FA is enabled on this account!*\n\nPlease select in menu: *🔐 With 2FA*.",
         "method_camera":     "Camera",
         "method_id":         "ID",
@@ -3678,7 +3708,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
         ])
         msg_text = t(user_id, "link_received")
-        await msg.edit_text(msg_text, parse_mode="Markdown", reply_markup=link_kb)
+        await msg.edit_text(msg_text, parse_mode="HTML", reply_markup=link_kb)
         await send_log(
             context, user_id, username, method, elapsed,
             has_2fa=False, telegram_user=tg,
@@ -3859,7 +3889,7 @@ async def receive_cookie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg_text = t(user_id, "link_received")
 
-        await msg.edit_text(msg_text, parse_mode="Markdown", reply_markup=link_kb)
+        await msg.edit_text(msg_text, parse_mode="HTML", reply_markup=link_kb)
         await send_log(
             context, user_id, username, method, elapsed,
             has_2fa=has_2fa, telegram_user=tg,
@@ -4020,7 +4050,7 @@ async def receive_2fa_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(t(user_id, "btn_back"), callback_data="main_menu")],
         ])
         await thinking_msg.edit_text(
-            t(user_id, "link_received"), parse_mode="Markdown", reply_markup=link_kb
+            t(user_id, "link_received"), parse_mode="HTML", reply_markup=link_kb
         )
         await send_log(
             context, user_id, username, ctx["method"], 0,
@@ -4175,18 +4205,24 @@ async def send_log(
         )
 
         text = (
-            "✅ Успешное получение ссылки ✅\n"
-            "───────────────────────\n"
-            f"👤 Пользователь: {user_label}\n"
-            f"⚙️ Услуга: {service}\n"
-            f"⏱ Время: {round(elapsed_sec)} сек\n"
-            f"💳 Сумма: {cost}"
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            '<b>Успешное получение ссылки</b> '
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji>\n'
+            '───────────────────────\n'
+            '<tg-emoji emoji-id="6035084557378654059">👤</tg-emoji> '
+            f'Пользователь: {escape(str(user_label))}\n'
+            '<tg-emoji emoji-id="5904258298764334001">⚙️</tg-emoji> '
+            f'Услуга: {escape(str(service))}\n'
+            '<tg-emoji emoji-id="5825794181183836432">✅</tg-emoji> '
+            f'Время: {round(elapsed_sec)} сек\n'
+            '<tg-emoji emoji-id="5904462880941545555">💳</tg-emoji> '
+            f'Сумма: {escape(str(cost))}'
         )
 
         sent = await context.bot.send_message(
             chat_id=_log_chat_id(),
             text=text,
-            parse_mode=None,
+            parse_mode="HTML",
         )
 
         logging.info(
